@@ -19,7 +19,6 @@ namespace LesbianDB.Optimism.Core
 		private readonly AsyncReaderWriterLock cachelock = new AsyncReaderWriterLock();
 		private readonly IDatabaseEngine databaseEngine;
 		private readonly ConcurrentDictionary<string, string> optimisticCache = new ConcurrentDictionary<string, string>();
-		private readonly long softMemoryLimit;
 		private readonly struct OptimisticCachePartition{
 			private readonly AsyncReaderWriterLock asyncReaderWriterLock;
 			private readonly Dictionary<string, string> dictionary;
@@ -92,10 +91,13 @@ namespace LesbianDB.Optimism.Core
 			return BitConverter.ToUInt16(bytes);
 		}
 		private readonly OptimisticCachePartition[] optimisticCachePartitions = new OptimisticCachePartition[256];
-		private static async void Collect(WeakReference<OptimisticCachePartition[]> weakReference){
+		private static async void Collect(WeakReference<OptimisticCachePartition[]> weakReference, long softMemoryLimit){
 		start:
 			ushort random = Random2();
 			await Task.Delay((random / 256) + 1);
+			if(Misc.thisProcess.VirtualMemorySize64 < softMemoryLimit){
+				goto start;
+			}
 			if(weakReference.TryGetTarget(out OptimisticCachePartition[] optimisticCachePartitions)){
 				await optimisticCachePartitions[random % 256].Clear();
 				goto start;
@@ -104,11 +106,10 @@ namespace LesbianDB.Optimism.Core
 		public OptimisticExecutionManager(IDatabaseEngine databaseEngine, long softMemoryLimit)
 		{
 			this.databaseEngine = databaseEngine ?? throw new ArgumentNullException(nameof(databaseEngine));
-			this.softMemoryLimit = softMemoryLimit;
 			for(int i = 0; i < 256; ){
 				optimisticCachePartitions[i++] = new OptimisticCachePartition(new AsyncReaderWriterLock(), new Dictionary<string, string>());
 			}
-			Collect(new WeakReference<OptimisticCachePartition[]>(optimisticCachePartitions, false));
+			Collect(new WeakReference<OptimisticCachePartition[]>(optimisticCachePartitions, false), softMemoryLimit);
 		}
 		private OptimisticCachePartition GetOptimisticCachePartition(string key)
 		{
