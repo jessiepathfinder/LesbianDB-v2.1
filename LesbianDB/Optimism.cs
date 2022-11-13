@@ -192,6 +192,9 @@ namespace LesbianDB.Optimism.Core
 			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngine, readOnly);
 		start:
 			T ret = await optimisticFunction(optimisticExecutionScope);
+			if(readOnly){
+				return ret;
+			}
 			//Conditions
 			Dictionary<string, string> reads = new Dictionary<string, string>(optimisticExecutionScope.L1ReadCache.ToArray());
 
