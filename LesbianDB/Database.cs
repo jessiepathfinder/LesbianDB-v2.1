@@ -9,11 +9,16 @@ using System.IO;
 using System.IO.Compression;
 using Newtonsoft.Json.Bson;
 using System.Buffers.Binary;
+using System.Net.Http;
+using System.Net;
+using System.Net.WebSockets;
+using System.Threading;
+using System.Security.Cryptography;
 
 namespace LesbianDB
 {
 	public interface IDatabaseEngine{
-		public Task<IReadOnlyDictionary<string, string>> Execute(ReadOnlyMemory<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes);
+		public Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes);
 	}
 
 	/// <summary>
@@ -96,23 +101,11 @@ namespace LesbianDB
 		private readonly AsyncMutex binlogLock;
 		private readonly Stream binlog;
 		private readonly AsyncReaderWriterLock[] asyncReaderWriterLocks = new AsyncReaderWriterLock[65536];
-		private void CheckReadLocks(Dictionary<ushort, bool> lockLevels, ReadOnlySpan<string> reads){
-			foreach(string str in reads){
-				lockLevels.TryAdd((ushort)(str.GetHashCode() & 65535), false);
-			}
-		}
-		private void AddReads(ReadOnlySpan<string> reads, Dictionary<string, Task<string>> pendingReads){
-			foreach(string read in reads){
-				if(!pendingReads.ContainsKey(read)){
-					pendingReads.Add(read, asyncDictionary.Read(read));
-				}
-			}
-		}
 		private async Task WriteAndFlushBinlog(byte[] buffer, int len){
 			await binlog.WriteAsync(buffer, 0, len);
 			await binlog.FlushAsync();
 		}
-		public async Task<IReadOnlyDictionary<string, string>> Execute(ReadOnlyMemory<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
 		{
 			//Lock checking
 			Dictionary<ushort, bool> lockLevels = new Dictionary<ushort, bool>();
@@ -123,7 +116,10 @@ namespace LesbianDB
 					lockLevels.Add((ushort)(keyValuePair.Key.GetHashCode() & 65535), true);
 				}
 			}
-			CheckReadLocks(lockLevels, reads.Span);
+			foreach (string str in reads)
+			{
+				lockLevels.TryAdd((ushort)(str.GetHashCode() & 65535), false);
+			}
 			foreach (KeyValuePair<string, string> keyValuePair in conditions)
 			{
 				lockLevels.TryAdd((ushort)(keyValuePair.Key.GetHashCode() & 65535), false);
@@ -155,7 +151,13 @@ namespace LesbianDB
 			}
 			try
 			{
-				AddReads(reads.Span, pendingReads);
+				foreach (string read in reads)
+				{
+					if (!pendingReads.ContainsKey(read))
+					{
+						pendingReads.Add(read, asyncDictionary.Read(read));
+					}
+				}
 				foreach (KeyValuePair<string, string> kvp in conditions)
 				{
 					string key = kvp.Key;
@@ -228,5 +230,171 @@ namespace LesbianDB
 			}
 			return readResults;
 		}
+	}
+
+	public sealed class RemoteDatabaseEngine : IDatabaseEngine, IDisposable{
+		[JsonObject(MemberSerialization.Fields)]
+		private sealed class Packet{
+			public readonly string id;
+			public readonly IEnumerable<string> reads;
+			public readonly IReadOnlyDictionary<string, string> conditions;
+			public readonly IReadOnlyDictionary<string, string> writes;
+
+			public Packet(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+			{
+				this.reads = reads;
+				this.conditions = conditions;
+				this.writes = writes;
+				Span<byte> bytes = stackalloc byte[32];
+				id = Convert.ToBase64String(bytes, Base64FormattingOptions.None);
+			}
+		}
+		[JsonObject(MemberSerialization.Fields)]
+
+		private sealed class Reply{
+			public string id;
+			public IReadOnlyDictionary<string, string> result;
+		}
+		private readonly ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>> completionSources = new ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>>();
+
+		private readonly ClientWebSocket clientWebSocket = new ClientWebSocket();
+		private readonly AsyncMutex asyncMutex = new AsyncMutex();
+		private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+		public static async Task<RemoteDatabaseEngine> Connect(Uri server, string key, CancellationToken cancellationToken = default)
+		{
+			RemoteDatabaseEngine remoteDatabaseEngine = new RemoteDatabaseEngine(key);
+			await remoteDatabaseEngine.clientWebSocket.ConnectAsync(server, cancellationToken);
+			remoteDatabaseEngine.ReceiveEventLoop();
+			return remoteDatabaseEngine;
+		}
+		private async void StartTimeout(string id){
+			await Task.Delay(5000);
+			if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
+			{
+				taskCompletionSource.SetException(new TimeoutException("The database transaction took too long!"));
+			}
+		}
+		private async void SendImpl(string json, string id)
+		{
+			byte[] bytes = null;
+			try
+			{
+				int len = Encoding.UTF8.GetByteCount(json);
+				bytes = Misc.arrayPool.Rent(len);
+				Encoding.UTF8.GetBytes(json, 0, json.Length, bytes, 0);
+
+				await asyncMutex.Enter();
+				try
+				{
+					await clientWebSocket.SendAsync(bytes.AsMemory(0, len), WebSocketMessageType.Text, true, default);
+				}
+				finally
+				{
+					asyncMutex.Exit();
+				}
+			}
+			catch (Exception e)
+			{
+				if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
+				{
+					taskCompletionSource.SetException(e);
+				}
+			}
+			finally
+			{
+				if (bytes is { })
+				{
+					Misc.arrayPool.Return(bytes, false);
+				}
+			}
+		}
+		public Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+		{
+			Packet packet = new Packet(reads, conditions, writes);
+			string json = JsonConvert.SerializeObject(packet);
+			
+			TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource = new TaskCompletionSource<IReadOnlyDictionary<string, string>>();
+			completionSources.TryAdd(packet.id, taskCompletionSource);
+
+			//One of these might complete first
+			StartTimeout(packet.id);
+			SendImpl(json, packet.id);
+			return taskCompletionSource.Task;
+			
+		}
+		private async void ReceiveEventLoop(){
+			try{
+				Reply reply = new Reply();
+				byte[] buffer = new byte[65536];
+				JsonSerializer jsonSerializer = new JsonSerializer();
+				jsonSerializer.MissingMemberHandling = MissingMemberHandling.Error;
+				CancellationToken cancellationToken = cancellationTokenSource.Token;
+				while(true){
+					using(MemoryStream memoryStream = new MemoryStream()){
+					read:
+						WebSocketReceiveResult recv = await clientWebSocket.ReceiveAsync(buffer, cancellationToken);
+						if (recv.MessageType.HasFlag(WebSocketMessageType.Close))
+						{
+							return;
+						}
+						int len = recv.Count;
+						await memoryStream.WriteAsync(buffer, 0, len);
+						if (!recv.EndOfMessage)
+						{
+							memoryStream.Capacity += len;
+							goto read;
+						}
+						memoryStream.Seek(0, SeekOrigin.Begin);
+						using(StreamReader streamReader = new StreamReader(memoryStream, Encoding.UTF8, false, -1, true)){
+							jsonSerializer.Populate(streamReader, reply);
+						}
+					}
+					if(completionSources.TryRemove(reply.id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource)){
+						taskCompletionSource.SetResult(reply.result);
+					}
+				}
+			} catch{
+				
+			}
+			finally
+			{
+				await asyncMutex.Enter();
+				try{
+					await clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Jessie Lesbian is cute!", default);
+					clientWebSocket.Dispose();
+					cancellationTokenSource.Dispose();
+				} finally{
+					asyncMutex.Exit();
+				}
+			}
+		}
+		private volatile int disposed;
+		public void Dispose()
+		{
+			if(Interlocked.Exchange(ref disposed, 1) == 0){
+				GC.SuppressFinalize(this);
+				cancellationTokenSource.Cancel();
+			}
+		}
+
+		private RemoteDatabaseEngine(string key){
+			GC.SuppressFinalize(clientWebSocket);
+			GC.SuppressFinalize(cancellationTokenSource);
+			ClientWebSocketOptions clientWebSocketOptions = clientWebSocket.Options;
+			clientWebSocketOptions.AddSubProtocol("LesbianDB-v2.1");
+			if(key is { }){
+				clientWebSocketOptions.SetRequestHeader("X-LesbianDB-auth", key);
+			}
+		}
+
+
+		~RemoteDatabaseEngine(){
+			if (Interlocked.Exchange(ref disposed, 1) == 0)
+			{
+				cancellationTokenSource.Cancel();
+			}
+		}
+		
+		
 	}
 }

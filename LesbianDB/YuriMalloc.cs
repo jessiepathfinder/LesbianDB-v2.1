@@ -131,4 +131,86 @@ namespace LesbianDB
 			}
 		}
 	}
+
+	public sealed class SimpleShardedSwapAllocator<T> : ISwapAllocator where T : ISwapAllocator, new(){
+		private readonly T[] swapAllocators;
+		public SimpleShardedSwapAllocator(int count){
+			if(count < 2){
+				throw new ArgumentOutOfRangeException("Minimum 2 swap allocators per SimpleShardedSwapAllocator");
+			}
+			swapAllocators = new T[count];
+			for(int i = 0; i < count; ){
+				swapAllocators[i++] = new T();
+			}
+		}
+
+		public Task<Func<Task<byte[]>>> Write(byte[] bytes)
+		{
+			return swapAllocators[RandomNumberGenerator.GetInt32(0, swapAllocators.Length)].Write(bytes);
+		}
+	}
+	/// <summary>
+	/// YuriMalloc swap files create a data remainance risk, so YuriEncrypt protects us by
+	/// encrypting the swap files with an AES-256 key that is destroyed after the process exits
+	/// </summary>
+	public sealed class YuriEncrypt : ISwapAllocator
+	{
+		private static readonly byte[] encryptionKey = new byte[32];
+		private static readonly byte[] iv = new byte[16];
+		static YuriEncrypt(){
+			RandomNumberGenerator.Fill(encryptionKey);
+		}
+		private readonly ISwapAllocator underlying;
+
+		public YuriEncrypt(ISwapAllocator underlying)
+		{
+			this.underlying = underlying ?? throw new ArgumentNullException(nameof(underlying));
+		}
+
+		private static byte[] Decrypt(byte[] bytes) {
+			int len = bytes.Length;
+			using (Aes aes = Aes.Create())
+			{
+				aes.KeySize = 256;
+				aes.Mode = CipherMode.CTS;
+				using (CryptoStream cryptoStream = new CryptoStream(new MemoryStream(bytes, 0, len, false, false), aes.CreateDecryptor(encryptionKey, iv), CryptoStreamMode.Read, false))
+				{
+					byte[] decrypted = new byte[len - 16];
+					if(len < 32){
+						Span<byte> nothing = stackalloc byte[16];
+						cryptoStream.Read(nothing);
+						cryptoStream.Read(decrypted, 0, len - 16);
+					} else{
+						cryptoStream.Read(decrypted, 0, 16);
+						cryptoStream.Read(decrypted, 0, len - 16);
+					}
+					return decrypted;
+				}
+			}
+		}
+		public Task<Func<Task<byte[]>>> Write(byte[] bytes)
+		{
+			using MemoryStream memoryStream = new MemoryStream(bytes.Length + 16);
+			using (Aes aes = Aes.Create())
+			{
+				aes.KeySize = 256;
+				aes.Mode = CipherMode.CTS;
+				using (CryptoStream cryptoStream = new CryptoStream(memoryStream, aes.CreateEncryptor(encryptionKey, iv), CryptoStreamMode.Write, true))
+				{
+					{
+						Span<byte> salt = stackalloc byte[16];
+						RandomNumberGenerator.Fill(salt);
+						cryptoStream.Write(salt);
+					}
+					cryptoStream.Write(bytes, 0, bytes.Length);
+					cryptoStream.FlushFinalBlock();
+				}
+			}
+			Task<Func<Task<byte[]>>> encrypted = underlying.Write(memoryStream.ToArray());
+			return Task.FromResult<Func<Task<byte[]>>>(async () =>
+			{
+				return Decrypt(await (await encrypted)());
+			});
+		}
+	}
 }

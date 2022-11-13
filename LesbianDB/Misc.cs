@@ -4,11 +4,16 @@ using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Buffers;
 using System.IO;
+using System.Diagnostics;
+using System.Collections.Concurrent;
+using System.Threading;
 
 namespace LesbianDB
 {
 	public static class Misc
 	{
+		internal static readonly Process thisProcess = Process.GetCurrentProcess();
+
 		public static readonly Task completed = Task.CompletedTask;
 		internal static ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();
 		public static string tmpdir = Path.GetTempPath();

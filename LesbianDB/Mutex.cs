@@ -16,7 +16,6 @@ namespace LesbianDB
 		private readonly Queue<Action<bool>> queue = new Queue<Action<bool>>();
 		private readonly object locker = new object();
 
-
 		/// <summary>
 		/// Returns a task that completes once we have entered the lock
 		/// </summary>
@@ -39,18 +38,14 @@ namespace LesbianDB
 			}
 		}
 		public void Exit(){
-			ThreadPool.QueueUserWorkItem(ReleaseImpl, this, true);
-		}
-		private static void ReleaseImpl(AsyncMutex _this){
-			lock (_this.locker)
-			{
-				if (_this.locked == 0)
+			lock(locker){
+				if (locked == 0)
 				{
 					throw new InvalidOperationException("Mutex already unlocked");
 				}
 				else
 				{
-					if (_this.queue.TryDequeue(out Action<bool> next))
+					if (queue.TryDequeue(out Action<bool> next))
 					{
 						//Hand over lock
 						next(false);
@@ -58,7 +53,7 @@ namespace LesbianDB
 					else
 					{
 						//Release lock
-						_this.locked = 0;
+						locked = 0;
 					}
 				}
 			}
