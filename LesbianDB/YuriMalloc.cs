@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using System.Security.Cryptography;
+using System.Collections.Concurrent;
 
 namespace LesbianDB
 {
@@ -94,9 +95,11 @@ namespace LesbianDB
 		}
 
 		private sealed class SimpleSwap{
-			private readonly FileStream fileStream = new FileStream(Misc.GetRandomFileName(), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose | FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.RandomAccess);
+			private readonly FileStream fileStream;
+			private readonly ConcurrentStack<Stream> recycler = new ConcurrentStack<Stream>();
+			private readonly string fileName = Misc.GetRandomFileName();
 			public SimpleSwap(){
-				GC.SuppressFinalize(fileStream);
+				fileStream = new FileStream(fileName, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 256, FileOptions.Asynchronous | FileOptions.DeleteOnClose | FileOptions.SequentialScan);
 			}
 			private readonly AsyncMutex asyncMutex = new AsyncMutex();
 			public async Task<Func<Task<byte[]>>> Write(byte[] bytes)
@@ -106,28 +109,30 @@ namespace LesbianDB
 				try{
 					address = fileStream.Seek(0, SeekOrigin.End);
 					await fileStream.WriteAsync(bytes);
+					await fileStream.FlushAsync();
 				} finally{
 					asyncMutex.Exit();
 				}
 				int size = bytes.Length;
-				return async () => {
-					byte[] bytes = new byte[size];
-					await asyncMutex.Enter();
-					try
-					{
-						fileStream.Seek(address, SeekOrigin.Begin);
-						await fileStream.ReadAsync(bytes, 0, size);
-					}
-					finally
-					{
-						asyncMutex.Exit();
-					}
-					return bytes;
-				};
+				return () => Read(fileStream, recycler, fileName, address, size);
 			}
-			~SimpleSwap(){
-				//Doesn't care about result
-				_ = fileStream.DisposeAsync();
+			private static async Task<byte[]> Read(object keptalive, ConcurrentStack<Stream> recycler, string filename, long offset, int size){
+				byte[] bytes = new byte[size];
+				if(!recycler.TryPop(out Stream stream)){
+					stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Write | FileShare.Delete, 256, FileOptions.RandomAccess | FileOptions.Asynchronous);
+				}
+				try{
+					stream.Seek(offset, SeekOrigin.Begin);
+					await stream.FlushAsync();
+					await stream.ReadAsync(bytes, 0, size);
+				} finally{
+					recycler.Push(stream);
+
+					//Keep write stream open until all references are garbage collected
+					//Because we may open new read streams
+					GC.KeepAlive(keptalive);
+				}
+				return bytes;
 			}
 		}
 	}
