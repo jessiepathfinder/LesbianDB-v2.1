@@ -129,25 +129,24 @@ namespace LesbianDB
 				}
 				stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 256, FileOptions.RandomAccess | FileOptions.Asynchronous);
 
+				//Keep write stream open until all references are garbage collected
+				//Because we may open new read streams
+				GC.KeepAlive(keptalive);
+
 			gotstream:
 				try{
 					stream.Seek(offset, SeekOrigin.Begin);
 					await stream.ReadAsync(bytes, 0, size);
 				} finally{
-					stream.FlushAsync().GetAwaiter().OnCompleted(() => {
-						try{
-							recycler.Add(stream);
-						} catch(ObjectDisposedException){
-							
-						}
-						GC.KeepAlive(stream);
-					});
-
-					//Keep write stream open until all references are garbage collected
-					//Because we may open new read streams
-					GC.KeepAlive(keptalive);
+					//Flush and return stream in the background
+					//For minimum latency
+					FlushAndReturn(recycler, stream);
 				}
 				return bytes;
+			}
+			private static async void FlushAndReturn(ConcurrentBag<Stream> recycler, Stream str){
+				await str.FlushAsync();
+				recycler.Add(str);
 			}
 		}
 	}
