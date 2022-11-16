@@ -123,8 +123,8 @@ namespace LesbianDB
 				}
 				try{
 					stream.Seek(offset, SeekOrigin.Begin);
-					await stream.FlushAsync();
 					await stream.ReadAsync(bytes, 0, size);
+					await stream.FlushAsync();
 				} finally{
 					recycler.Push(stream);
 
