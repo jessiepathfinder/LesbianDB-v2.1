@@ -96,7 +96,7 @@ namespace LesbianDB
 
 		private sealed class SimpleSwap{
 			private readonly FileStream fileStream;
-			private readonly ConcurrentStack<Stream> recycler = new ConcurrentStack<Stream>();
+			private readonly ConcurrentBag<Stream> recycler = new ConcurrentBag<Stream>();
 			private readonly string fileName = Misc.GetRandomFileName();
 			public SimpleSwap(){
 				fileStream = new FileStream(fileName, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 256, FileOptions.Asynchronous | FileOptions.DeleteOnClose | FileOptions.SequentialScan);
@@ -116,17 +116,32 @@ namespace LesbianDB
 				int size = bytes.Length;
 				return () => Read(fileStream, recycler, fileName, address, size);
 			}
-			private static async Task<byte[]> Read(object keptalive, ConcurrentStack<Stream> recycler, string filename, long offset, int size){
+			private static async Task<byte[]> Read(object keptalive, ConcurrentBag<Stream> recycler, string filename, long offset, int size){
 				byte[] bytes = new byte[size];
-				if(!recycler.TryPop(out Stream stream)){
-					stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Write | FileShare.Delete, 256, FileOptions.RandomAccess | FileOptions.Asynchronous);
+				Stream stream;
+				try{
+					if (recycler.TryTake(out stream))
+					{
+						goto gotstream;
+					}
+				} catch(ObjectDisposedException){
+					
 				}
+				stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 256, FileOptions.RandomAccess | FileOptions.Asynchronous);
+
+			gotstream:
 				try{
 					stream.Seek(offset, SeekOrigin.Begin);
 					await stream.ReadAsync(bytes, 0, size);
-					await stream.FlushAsync();
 				} finally{
-					recycler.Push(stream);
+					stream.FlushAsync().GetAwaiter().OnCompleted(() => {
+						try{
+							recycler.Add(stream);
+						} catch(ObjectDisposedException){
+							
+						}
+						GC.KeepAlive(stream);
+					});
 
 					//Keep write stream open until all references are garbage collected
 					//Because we may open new read streams
