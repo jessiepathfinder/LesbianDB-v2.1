@@ -17,7 +17,6 @@ namespace LesbianDB
 		public Task<string> Read(string key);
 		public Task Write(string key, string value);
 	}
-
 	public sealed class SequentialAccessAsyncDictionary : IAsyncDictionary{
 		private readonly ISwapAllocator allocator;
 		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
@@ -27,7 +26,7 @@ namespace LesbianDB
 			this.allocator = allocator ?? throw new ArgumentNullException(nameof(allocator));
 		}
 
-		private Task<Func<Task<byte[]>>> current;
+		private Task<Func<Task<PooledReadOnlyMemoryStream>>> current;
 
 
 		public async Task<string> Read(string key){
@@ -38,8 +37,7 @@ namespace LesbianDB
 			await asyncReaderWriterLock.AcquireReaderLock();
 			try{
 				if (current is { }){
-					byte[] bytes1 = await (await current)();
-					using Stream deflateStream = new DeflateStream(new MemoryStream(bytes1, 0, bytes1.Length, false, false), CompressionMode.Decompress, false);
+					using Stream deflateStream = new DeflateStream(await (await current)(), CompressionMode.Decompress, false);
 					BsonDataReader bsonDataReader = new BsonDataReader(deflateStream, true, DateTimeKind.Unspecified);
 					GC.SuppressFinalize(bsonDataReader);
 					bsonDataReader.Read();
@@ -72,15 +70,18 @@ namespace LesbianDB
 			try
 			{
 				using MemoryStream output = new MemoryStream();
-				using (Stream outputDeflateStream = new DeflateStream(output, CompressionLevel.Optimal, false)){
+				using (Stream outputDeflateStream = new DeflateStream(output, CompressionLevel.Optimal, true)){
 					BsonDataWriter bsonDataWriter = new BsonDataWriter(outputDeflateStream);
 					GC.SuppressFinalize(bsonDataWriter);
 					bsonDataWriter.WriteStartArray();
-
+					if (value is { })
+					{
+						bsonDataWriter.WriteValue(key);
+						bsonDataWriter.WriteValue(value);
+					}
 					if (current is { })
 					{
-						byte[] bytes1 = await (await current)();
-						using Stream input = new DeflateStream(new MemoryStream(bytes1, 0, bytes1.Length, false, false), CompressionMode.Decompress, false);
+						using Stream input = new DeflateStream(await (await current)(), CompressionMode.Decompress, false);
 						BsonDataReader bsonDataReader = new BsonDataReader(input, true, DateTimeKind.Unspecified);
 						GC.SuppressFinalize(bsonDataReader);
 						bsonDataReader.Read();
@@ -101,13 +102,9 @@ namespace LesbianDB
 							}
 						}
 					}
-					if(value is { }){
-						bsonDataWriter.WriteValue(key);
-						bsonDataWriter.WriteValue(value);
-					}
 					bsonDataWriter.WriteEndArray();
 				}
-				current = allocator.Write(output.ToArray());
+				current = allocator.Write(output.GetBuffer().AsMemory(0, (int)output.Position));
 			}
 			finally
 			{
@@ -127,7 +124,7 @@ namespace LesbianDB
 			}
 		}
 		private IAsyncDictionary GetUnderlying(string key){
-			int hash = ("Lesbians are cute " + key).GetHashCode() % shards.Length;
+			int hash = ("asmr yuri lesbian neck kissing" + key).GetHashCode() % shards.Length;
 			if(hash < 0){
 				return shards[-hash];
 			} else{
@@ -145,7 +142,13 @@ namespace LesbianDB
 			return GetUnderlying(key).Write(key, value);
 		}
 	}
-	public sealed class CachedAsyncDictionary : IAsyncDictionary{
+	public interface IFlushableAsyncDictionary : IAsyncDictionary{
+		/// <summary>
+		/// Flushes all dirty keys to an underlying medium.
+		/// </summary>
+		public Task Flush();
+	}
+	public sealed class CachedAsyncDictionary : IFlushableAsyncDictionary{
 		private readonly ConcurrentDictionary<string, CacheLine> cache = new ConcurrentDictionary<string, CacheLine>();
 		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
 		private readonly IAsyncDictionary underlying;
@@ -156,6 +159,27 @@ namespace LesbianDB
 			Span<byte> bytes = stackalloc byte[1];
 			RandomNumberGenerator.Fill(bytes);
 			return Task.Delay(bytes[0] + 1);
+		}
+		public async Task Flush(){
+			await asyncReaderWriterLock.AcquireWriterLock();
+			try{
+				Queue<Task> tasks = new Queue<Task>();
+				foreach(KeyValuePair<string, CacheLine> keyValuePair in cache.ToArray()){
+					CacheLine value = keyValuePair.Value;
+					if(value.dirty){
+						string key = keyValuePair.Key;
+						tasks.Enqueue(underlying.Write(key, value.value));
+
+						//Unmark as dirty to avoid double flushing of the same value
+						cache[key] = new CacheLine(false, value.value);
+					}
+				}
+				while(tasks.TryDequeue(out Task tsk)){
+					await tsk;
+				}
+			} finally{
+				asyncReaderWriterLock.ReleaseWriterLock();
+			}
 		}
 		private static async void Collect(WeakReference<CachedAsyncDictionary> weakReference){
 		start:

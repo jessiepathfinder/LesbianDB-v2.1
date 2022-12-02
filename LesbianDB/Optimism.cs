@@ -82,19 +82,14 @@ namespace LesbianDB.Optimism.Core
 				{
 					return Task.FromResult(value);
 				} else{
-					return ReadUnderlying2(key);
+					return readOnly ? ReadUnderlying2(key) : ReadUnderlying(key);
 				}
 			}
 			private async Task<string> ReadUnderlying(string key){
-				string value;
-				if(readOnly){
-					value = await ReadUnderlying2(key);
-				} else{
-					ConcurrentDictionary<string, string> optimisticCachePartition = GetOptimisticCachePartition(key);
-					if (!optimisticCachePartition.TryGetValue(key, out value))
-					{
-						value = optimisticCachePartition.GetOrAdd(key, await ReadUnderlying2(key));
-					}
+				ConcurrentDictionary<string, string> optimisticCachePartition = GetOptimisticCachePartition(key);
+				if (!optimisticCachePartition.TryGetValue(key, out string value))
+				{
+					value = optimisticCachePartition.GetOrAdd(key, await ReadUnderlying2(key));
 				}
 				value = L1ReadCache.GetOrAdd(key, value);
 
@@ -116,8 +111,12 @@ namespace LesbianDB.Optimism.Core
 				if (readOnly)
 				{
 					throw new InvalidOperationException("Writing is not allowed in read-only optimistic function");
+				} else if (key.StartsWith("LesbianDB_reserved_"))
+				{
+					throw new InvalidOperationException("Writing to keys starting with \"LesbianDB_reserved_\" is discouraged");
 				}
-				else{
+				else
+				{
 					L1WriteCache[key] = value;
 				}
 			}

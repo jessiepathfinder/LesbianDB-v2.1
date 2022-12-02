@@ -131,6 +131,7 @@ namespace LesbianDB
 			//Pending reads
 			Dictionary<string, Task<string>> pendingReads = new Dictionary<string, Task<string>>();
 			Dictionary<string, string> readResults = new Dictionary<string, string>();
+			Dictionary<string, Task<string>> conditionReads = new Dictionary<string, Task<string>>();
 
 			//binlog stuff
 			byte[] buffer = null;
@@ -158,6 +159,10 @@ namespace LesbianDB
 						pendingReads.Add(read, asyncDictionary.Read(read));
 					}
 				}
+				foreach (KeyValuePair<string, Task<string>> kvp in pendingReads)
+				{
+					readResults.Add(kvp.Key, await kvp.Value);
+				}
 				foreach (KeyValuePair<string, string> kvp in conditions)
 				{
 					string key = kvp.Key;
@@ -165,38 +170,47 @@ namespace LesbianDB
 					{
 						tsk = asyncDictionary.Read(key);
 					}
-					write &= kvp.Value == await tsk;
+					conditionReads.Add(kvp.Key, tsk);
 				}
-				foreach(KeyValuePair<string, Task<string>> kvp in pendingReads){
-					readResults.Add(kvp.Key, await kvp.Value);
+				if(!write){
+					return readResults;
 				}
-				if(write){
-					if (binlog is { })
+				foreach (KeyValuePair<string, string> kvp in conditions)
+				{
+					if(kvp.Value != await conditionReads[kvp.Key]){
+						return readResults;
+					}
+				}
+
+				if (binlog is { })
+				{
+					int len;
+					JsonSerializer jsonSerializer = new JsonSerializer();
+					using (MemoryStream memoryStream = new MemoryStream())
 					{
-						int len;
-						JsonSerializer jsonSerializer = new JsonSerializer();
-						using (MemoryStream memoryStream = new MemoryStream()){
-							using(Stream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true)){
-								BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
-								jsonSerializer.Serialize(bsonDataWriter, writes);
-							}
-							len = (int)memoryStream.Position;
-							memoryStream.Seek(0, SeekOrigin.Begin);
-							buffer = Misc.arrayPool.Rent(len + 4);
-							memoryStream.Read(buffer, 4, len);
+						using (Stream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true))
+						{
+							BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
+							jsonSerializer.Serialize(bsonDataWriter, writes);
 						}
-						BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
-						binlocked = true;
-						await binlogLock.Enter();
-						writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
+						len = (int)memoryStream.Position;
+						memoryStream.Seek(0, SeekOrigin.Begin);
+						buffer = Misc.arrayPool.Rent(len + 4);
+						memoryStream.Read(buffer, 4, len);
 					}
-					Queue<Task> writeTasks = new Queue<Task>();
-					foreach(KeyValuePair<string, string> keyValuePair in writes){
-						writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
-					}
-					foreach(Task tsk in writeTasks){
-						await tsk;
-					}
+					BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
+					binlocked = true;
+					await binlogLock.Enter();
+					writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
+				}
+				Queue<Task> writeTasks = new Queue<Task>();
+				foreach (KeyValuePair<string, string> keyValuePair in writes)
+				{
+					writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
+				}
+				foreach (Task tsk in writeTasks)
+				{
+					await tsk;
 				}
 			}
 			finally
@@ -207,24 +221,30 @@ namespace LesbianDB
 					//Buffer will always be created before binlog locking
 					if (binlocked)
 					{
-						//Binlog writing will always start after binlog locking
-						if (writeBinlog is { })
+						try
 						{
-							await writeBinlog;
+							//Binlog writing will always start after binlog locking
+							if (writeBinlog is { })
+							{
+								await writeBinlog;
+							}
 						}
-						binlogLock.Exit();
+						finally
+						{
+							binlogLock.Exit();
+						}
 					}
 					Misc.arrayPool.Return(buffer, false);
 				}
-				foreach (ushort id in locks)
+				foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 				{
-					if (lockLevels[id])
+					if (keyValuePair.Value)
 					{
-						asyncReaderWriterLocks[id].ReleaseWriterLock();
+						asyncReaderWriterLocks[keyValuePair.Key].ReleaseWriterLock();
 					}
 					else
 					{
-						asyncReaderWriterLocks[id].ReleaseReaderLock();
+						asyncReaderWriterLocks[keyValuePair.Key].ReleaseReaderLock();
 					}
 				}
 			}
@@ -260,9 +280,9 @@ namespace LesbianDB
 		private readonly ClientWebSocket clientWebSocket = new ClientWebSocket();
 		private readonly AsyncMutex asyncMutex = new AsyncMutex();
 		private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
-		public static async Task<RemoteDatabaseEngine> Connect(Uri server, string key, CancellationToken cancellationToken = default)
+		public static async Task<RemoteDatabaseEngine> Connect(Uri server, CancellationToken cancellationToken = default)
 		{
-			RemoteDatabaseEngine remoteDatabaseEngine = new RemoteDatabaseEngine(key);
+			RemoteDatabaseEngine remoteDatabaseEngine = new RemoteDatabaseEngine();
 			await remoteDatabaseEngine.clientWebSocket.ConnectAsync(server, cancellationToken);
 			remoteDatabaseEngine.ReceiveEventLoop();
 			return remoteDatabaseEngine;
@@ -377,14 +397,10 @@ namespace LesbianDB
 			}
 		}
 
-		private RemoteDatabaseEngine(string key){
+		private RemoteDatabaseEngine(){
 			GC.SuppressFinalize(clientWebSocket);
 			GC.SuppressFinalize(cancellationTokenSource);
-			ClientWebSocketOptions clientWebSocketOptions = clientWebSocket.Options;
-			clientWebSocketOptions.AddSubProtocol("LesbianDB-v2.1");
-			if(key is { }){
-				clientWebSocketOptions.SetRequestHeader("X-LesbianDB-auth", key);
-			}
+			clientWebSocket.Options.AddSubProtocol("LesbianDB-v2.1");
 		}
 
 

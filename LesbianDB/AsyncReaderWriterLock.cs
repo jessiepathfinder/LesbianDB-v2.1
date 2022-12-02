@@ -18,40 +18,6 @@ namespace LesbianDB
 			await writer.Enter();
 			await SafeAcquireReadSemaphore();
 		}
-		private volatile int pendingLockUpgrade;
-
-		public async Task<bool> TryUpgradeToWriterLock()
-		{
-			if (Interlocked.Exchange(ref pendingLockUpgrade, 1) == 0)
-			{
-				try
-				{
-					await writer.Enter();
-					if (Interlocked.Decrement(ref _readerCount) > 0)
-					{
-						try
-						{
-							await SafeAcquireReadSemaphore();
-						}
-						catch
-						{
-							Interlocked.Increment(ref _readerCount);
-							throw;
-						}
-					}
-				}
-				finally
-				{
-					pendingLockUpgrade = 0;
-				}
-				return true;
-			}
-			else
-			{
-				return false;
-			}
-
-		}
 
 		public void ReleaseWriterLock()
 		{
