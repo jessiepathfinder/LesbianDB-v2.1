@@ -257,11 +257,41 @@ namespace LesbianDB
 		}
 	}
 	public sealed class RandomFlushingCache{
-		private byte Random(){
+		private readonly IFlushableAsyncDictionary[] flushableAsyncDictionaries = new IFlushableAsyncDictionary[65536];
+		private static byte Random(out ushort rnd2){
 			Span<byte> bytes = stackalloc byte[3];
 			RandomNumberGenerator.Fill(bytes);
+			rnd2 = BitConverter.ToUInt16(bytes.Slice(0, 2));
 
-			return bytes[0];
+			return bytes[2];
 		}
+
+
+		public RandomFlushingCache(Func<IFlushableAsyncDictionary> func, long softMemoryLimit)
+		{
+			for(int i = 0; i < 65536; ){
+				flushableAsyncDictionaries[i++] = func();
+			}
+			EvictionLoop(new WeakReference<IFlushableAsyncDictionary[]>(flushableAsyncDictionaries, false), softMemoryLimit);
+		}
+
+		private static async void EvictionLoop(WeakReference<IFlushableAsyncDictionary[]> weakReference, long softMemoryLimit){
+		start:
+			byte rnd = Random(out ushort select);
+			if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
+			{
+				await Task.Delay(1);
+			}
+			else
+			{
+				await Task.Delay(rnd + 1);
+			}
+			if (weakReference.TryGetTarget(out IFlushableAsyncDictionary[] array))
+			{
+				await array[select].Flush();
+				goto start;
+			}
+		}
+
 	}
 }

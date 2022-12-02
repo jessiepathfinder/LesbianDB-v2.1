@@ -52,7 +52,6 @@ namespace LesbianDB
 			pendingHeavyTask.taskCompletionSource.SetResult(res);
 		}
 		public static int HashString2(string str){
-			str = str.Length + "-LXDB_FASTHASH-" + str;
 			int len = Encoding.UTF8.GetByteCount(str);
 			if(len > 1008){
 				byte[] bytes = null;
