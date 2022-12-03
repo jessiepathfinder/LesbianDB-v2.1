@@ -256,7 +256,7 @@ namespace LesbianDB
 			}
 		}
 	}
-	public sealed class RandomFlushingCache{
+	public sealed class RandomFlushingCache : IFlushableAsyncDictionary{
 		private readonly IFlushableAsyncDictionary[] flushableAsyncDictionaries = new IFlushableAsyncDictionary[65536];
 		private static byte Random(out ushort rnd2){
 			Span<byte> bytes = stackalloc byte[3];
@@ -266,13 +266,17 @@ namespace LesbianDB
 			return bytes[2];
 		}
 
-
-		public RandomFlushingCache(Func<IFlushableAsyncDictionary> func, long softMemoryLimit)
+		private readonly bool userandomhash;
+		public RandomFlushingCache(Func<IFlushableAsyncDictionary> func, long softMemoryLimit, bool userandomhash)
 		{
 			for(int i = 0; i < 65536; ){
 				flushableAsyncDictionaries[i++] = func();
 			}
+			this.userandomhash = userandomhash;
 			EvictionLoop(new WeakReference<IFlushableAsyncDictionary[]>(flushableAsyncDictionaries, false), softMemoryLimit);
+		}
+		private IFlushableAsyncDictionary Hash(string key){
+			return flushableAsyncDictionaries[(userandomhash ? ("Minecraft Alex is lesbian" + key).GetHashCode() : Misc.HashString2(key)) & 65535];
 		}
 
 		private static async void EvictionLoop(WeakReference<IFlushableAsyncDictionary[]> weakReference, long softMemoryLimit){
@@ -293,5 +297,78 @@ namespace LesbianDB
 			}
 		}
 
+		public async Task Flush()
+		{
+			Queue<Task> tasks = new Queue<Task>();
+			foreach(IFlushableAsyncDictionary flushableAsyncDictionary in flushableAsyncDictionaries){
+				tasks.Enqueue(flushableAsyncDictionary.Flush());
+			}
+			while(tasks.TryDequeue(out Task tsk)){
+				await tsk;
+			}
+		}
+
+		public Task<string> Read(string key)
+		{
+			return Hash(key).Read(key);
+		}
+
+		public Task Write(string key, string value)
+		{
+			return Hash(key).Write(key, value);
+		}
+	}
+	public sealed class RandomReplacementWriteThroughCache : IAsyncDictionary{
+		private readonly ConcurrentDictionary<string, string>[] cache = new ConcurrentDictionary<string, string>[256];
+		private readonly IAsyncDictionary underlying;
+
+		public RandomReplacementWriteThroughCache(IAsyncDictionary underlying, long softMemoryLimit)
+		{
+			for (int i = 0; i < 256;)
+			{
+				cache[i++] = new ConcurrentDictionary<string, string>();
+			}
+			EvictionThread(new WeakReference<ConcurrentDictionary<string, string>[]>(cache, false), softMemoryLimit);
+			this.underlying = underlying ?? throw new ArgumentNullException(nameof(underlying));
+		}
+		private static void RandomEvict(ConcurrentDictionary<string, string>[] cache)
+		{
+			Span<byte> bytes = stackalloc byte[1];
+			RandomNumberGenerator.Fill(bytes);
+			cache[bytes[0]].Clear();
+		}
+		private static Task RandomWait(){
+			Span<byte> bytes = stackalloc byte[1];
+			RandomNumberGenerator.Fill(bytes);
+			return Task.Delay(bytes[0] + 1);
+		}
+		private static async void EvictionThread(WeakReference<ConcurrentDictionary<string, string>[]> weakReference, long softMemoryLimit){
+		start:
+			await RandomWait();
+			if(weakReference.TryGetTarget(out ConcurrentDictionary<string, string>[] cache)){
+				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
+					RandomEvict(cache);
+				}
+				goto start;
+			}
+		}
+		private ConcurrentDictionary<string, string> Hash(string key){
+			return cache[("Cute anime lesbians" + key).GetHashCode() & 255];
+		}
+		public async Task<string> Read(string key)
+		{
+			ConcurrentDictionary<string, string> keyValuePairs = Hash(key);
+			if(keyValuePairs.TryGetValue(key, out string value)){
+				return value;
+			}
+			return keyValuePairs.GetOrAdd(key, await underlying.Read(key));
+		}
+
+		public async Task Write(string key, string value)
+		{
+			Task task = underlying.Read(key);
+			Hash(key)[key] = value;
+			await task;
+		}
 	}
 }

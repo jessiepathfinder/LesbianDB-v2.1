@@ -22,7 +22,7 @@ namespace LesbianDB.Tests
 			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new SequentialAccessAsyncDictionary(new YuriMalloc())), 0);
 			for (int i = 0; i < 4096;)
 			{
-				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 			}
 		}
 		[Test]
@@ -32,7 +32,7 @@ namespace LesbianDB.Tests
 			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(dictionary), 0);
 			for (int i = 0; i < 4096;)
 			{
-				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 				if(i % 16 == 0){
 					await dictionary.Flush();
 				}
@@ -45,11 +45,21 @@ namespace LesbianDB.Tests
 			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(dictionary), 0);
 			for (int i = 0; i < 4096;)
 			{
-				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 				if (i % 16 == 0)
 				{
 					await dictionary.Flush();
 				}
+			}
+		}
+		[Test]
+		public async Task SaskiaCache()
+		{
+			YuriMalloc yuriMalloc = new YuriMalloc();
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new RandomReplacementWriteThroughCache(new RandomFlushingCache(() => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(yuriMalloc)), 0, true), 0)), 0);
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 			}
 		}
 		[Test]
@@ -59,7 +69,7 @@ namespace LesbianDB.Tests
 			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(dictionary), 0);
 			for (int i = 0; i < 4096;)
 			{
-				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 				if (i % 16 == 0)
 				{
 					await dictionary.Flush();
@@ -72,7 +82,7 @@ namespace LesbianDB.Tests
 			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(enhancedAsyncDictionary), 0);
 			for (int i = 0; i < 4096;)
 			{
-				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 			}
 		}
 		[Test]
@@ -81,7 +91,7 @@ namespace LesbianDB.Tests
 			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new LevelDBEngine(Misc.GetRandomFileName()), 0);
 			for (int i = 0; i < 4096;)
 			{
-				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 			}
 		}
 		[Test]
@@ -93,7 +103,7 @@ namespace LesbianDB.Tests
 				OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(levelDBEngine, 0);
 				for (int i = 0; i < 1024;)
 				{
-					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 				}
 			}
 			using (LevelDBEngine levelDBEngine = await LevelDBEngine.RestoreBinlog(binlog, Misc.GetRandomFileName()))
@@ -101,7 +111,7 @@ namespace LesbianDB.Tests
 				OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(levelDBEngine, 0);
 				for (int i = 1024; i < 2048;)
 				{
-					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 				}
 			}
 			binlog.Seek(1234, SeekOrigin.Begin);
@@ -110,7 +120,7 @@ namespace LesbianDB.Tests
 				OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(levelDBEngine, 0);
 				for (int i = 2048; i < 4096;)
 				{
-					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter, false));
+					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 				}
 			}
 

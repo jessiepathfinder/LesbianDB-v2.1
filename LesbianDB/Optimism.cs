@@ -11,9 +11,22 @@ using LesbianDB;
 namespace LesbianDB.Optimism.Core
 {
 	public interface IOptimisticExecutionScope{
+		/// <summary>
+		/// Serializable and cacheable optimistic locking read
+		/// </summary>
 		public Task<string> Read(string key);
+		/// <summary>
+		/// Uncached atomically snapshotting optimistic locking read (may throw spurrious OptimisticFaults)
+		/// </summary>
+		public Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys);
 		//NOTE: the write method is not asynchromous since writes are cached in-memory until commit
 		public void Write(string key, string value);
+	}
+	/// <summary>
+	/// An optimistic fault that causes the optimistic execution manager to revert and restart the transaction
+	/// </summary>
+	public sealed class OptimisticFault : Exception{
+		
 	}
 	public sealed class OptimisticExecutionManager{
 		private readonly IDatabaseEngine databaseEngine;
@@ -58,20 +71,46 @@ namespace LesbianDB.Optimism.Core
 			private readonly IDatabaseEngine databaseEngine;
 			public readonly ConcurrentDictionary<string, string> L1ReadCache = new ConcurrentDictionary<string, string>();
 			public readonly ConcurrentDictionary<string, string> L1WriteCache = new ConcurrentDictionary<string, string>();
-			private readonly bool readOnly;
 
-			public OptimisticExecutionScope(ConcurrentDictionary<string, string>[] optimisticCachePartitions, IDatabaseEngine databaseEngine, bool readOnly)
+			public OptimisticExecutionScope(ConcurrentDictionary<string, string>[] optimisticCachePartitions, IDatabaseEngine databaseEngine)
 			{
 				this.optimisticCachePartitions = optimisticCachePartitions;
 				this.databaseEngine = databaseEngine;
-				this.readOnly = readOnly;
 			}
 
 			private ConcurrentDictionary<string, string> GetOptimisticCachePartition(string key)
 			{
 				return optimisticCachePartitions[("Lesbians are optimistic " + key).GetHashCode() & 255];
 			}
+			public async Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys){
+				IReadOnlyDictionary<string, string> read = await databaseEngine.Execute(keys, emptyStringDictionary, emptyStringDictionary);
+				foreach(KeyValuePair<string, string> keyValuePair in read){
+					string value = keyValuePair.Value;
+					if(L1ReadCache.GetOrAdd(keyValuePair.Key, value) != value){
+						throw new OptimisticFault();
+					}
+				}
 
+				IDictionary<string, string> keyValuePairs = read as IDictionary<string, string> ?? new Dictionary<string, string>();
+				if(ReferenceEquals(keyValuePairs, read)){
+					foreach(string key in keys){
+						if(L1WriteCache.TryGetValue(key, out string value)){
+							keyValuePairs[key] = value;
+						}
+					}
+				} else{
+					foreach (string key in read.Keys)
+					{
+						if (L1WriteCache.TryGetValue(key, out string value))
+						{
+							keyValuePairs.Add(key, value);
+						} else{
+							keyValuePairs.Add(read[key], value);
+						}
+					}
+				}
+				return (IReadOnlyDictionary<string, string>)keyValuePairs;
+			}
 
 			public Task<string> Read(string key)
 			{
@@ -82,14 +121,14 @@ namespace LesbianDB.Optimism.Core
 				{
 					return Task.FromResult(value);
 				} else{
-					return readOnly ? ReadUnderlying2(key) : ReadUnderlying(key);
+					return ReadUnderlying(key);
 				}
 			}
 			private async Task<string> ReadUnderlying(string key){
 				ConcurrentDictionary<string, string> optimisticCachePartition = GetOptimisticCachePartition(key);
 				if (!optimisticCachePartition.TryGetValue(key, out string value))
 				{
-					value = optimisticCachePartition.GetOrAdd(key, await ReadUnderlying2(key));
+					value = optimisticCachePartition.GetOrAdd(key, (await databaseEngine.Execute(new string[] { key }, emptyStringDictionary, emptyStringDictionary))[key]);
 				}
 				value = L1ReadCache.GetOrAdd(key, value);
 
@@ -102,31 +141,26 @@ namespace LesbianDB.Optimism.Core
 					return value;
 				}
 			}
-			private async Task<string> ReadUnderlying2(string key){
-				return (await databaseEngine.Execute(new string[] { key }, emptyStringDictionary, emptyStringDictionary))[key];
-			}
 
 			public void Write(string key, string value)
 			{
-				if (readOnly)
-				{
-					throw new InvalidOperationException("Writing is not allowed in read-only optimistic function");
-				} else if (key.StartsWith("LesbianDB_reserved_"))
+				if (key.StartsWith("LesbianDB_reserved_"))
 				{
 					throw new InvalidOperationException("Writing to keys starting with \"LesbianDB_reserved_\" is discouraged");
 				}
-				else
-				{
-					L1WriteCache[key] = value;
-				}
+				L1WriteCache[key] = value;
 			}
 		}
-		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction, bool readOnly){
-			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngine, readOnly);
+		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction){
+			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngine);
 		start:
-			T ret = await optimisticFunction(optimisticExecutionScope);
-			if(readOnly){
-				return ret;
+			T ret;
+			try{
+				ret = await optimisticFunction(optimisticExecutionScope);
+			} catch(OptimisticFault){
+				optimisticExecutionScope.L1ReadCache.Clear();
+				optimisticExecutionScope.L1WriteCache.Clear();
+				goto start;
 			}
 			//Conditions
 			Dictionary<string, string> reads = new Dictionary<string, string>(optimisticExecutionScope.L1ReadCache.ToArray());
@@ -149,9 +183,6 @@ namespace LesbianDB.Optimism.Core
 			foreach(KeyValuePair<string, string> kvp in updated){
 				string key = kvp.Key;
 				string value = kvp.Value;
-				if(!readOnly){
-					GetOptimisticCachePartition(key)[key] = value;
-				}
 				success &= reads[key] == value;
 			}
 			if (success)
