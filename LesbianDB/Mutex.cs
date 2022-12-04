@@ -11,52 +11,78 @@ namespace LesbianDB
 	/// <summary>
 	/// Truly nonblocking async mutexes
 	/// </summary>
-	public sealed class AsyncMutex{
-		private byte locked;
-		private readonly Queue<Action<bool>> queue = new Queue<Action<bool>>();
-		private readonly object locker = new object();
+	public sealed class AsyncMutex {
+		private sealed class LockQueueHead{
+			public LockQueueNode first;
+			public LockQueueHead(){
+				
+			}
+			public static readonly LockQueueHead starting = new LockQueueHead();
+		}
+		private sealed class LockQueueNode{
+			public LockQueueNode prev;
+			public Action<bool> release;
+		}
+		private volatile LockQueueHead lockQueueHead;
+
 
 		/// <summary>
 		/// Returns a task that completes once we have entered the lock
 		/// </summary>
 		public Task Enter(){
-			//If the lock is available, we return on the spot
-			lock (locker)
-			{
-				if (locked == 0)
-				{
-					locked = 1;
+			LockQueueNode newLockQueueNode = null;
+			LockQueueHead newLockQueueHead = null;
+			TaskCompletionSource<bool> taskCompletionSource = null;
+		start:
+			LockQueueHead old = lockQueueHead;
+			if(old is null){
+				if(Interlocked.CompareExchange(ref lockQueueHead, LockQueueHead.starting, null) is null){
 					return Misc.completed;
 				}
-				else
-				{
-					//Add us to the queue of awaiters
-					TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.None);
-					queue.Enqueue(taskCompletionSource.SetResult);
+			} else{
+				if(newLockQueueNode is null){
+					newLockQueueNode = new LockQueueNode();
+					newLockQueueHead = new LockQueueHead();
+					newLockQueueHead.first = newLockQueueNode;
+					taskCompletionSource = new TaskCompletionSource<bool>();
+				}
+				newLockQueueNode.prev = old.first;
+				newLockQueueNode.release = taskCompletionSource.SetResult;
+				if(ReferenceEquals(Interlocked.CompareExchange(ref lockQueueHead, newLockQueueHead, old), old)){
 					return taskCompletionSource.Task;
 				}
 			}
+			goto start;
 		}
 		public void Exit(){
-			lock(locker){
-				if (locked == 0)
+			LockQueueHead newLockQueueHead = null;
+		start:
+			LockQueueHead old = lockQueueHead;
+			if (old is null){
+				throw new InvalidOperationException("Attempted to exit unlocked mutex!");
+			}
+			if (old.first is null)
+			{
+				if (ReferenceEquals(Interlocked.CompareExchange(ref lockQueueHead, null, old), old))
 				{
-					throw new InvalidOperationException("Mutex already unlocked");
-				}
-				else
-				{
-					if (queue.TryDequeue(out Action<bool> next))
-					{
-						//Hand over lock
-						next(false);
-					}
-					else
-					{
-						//Release lock
-						locked = 0;
-					}
+					return;
 				}
 			}
+			else{
+				if (newLockQueueHead is null)
+				{
+					newLockQueueHead = new LockQueueHead();
+				}
+				newLockQueueHead.first = old.first.prev;
+				if (ReferenceEquals(Interlocked.CompareExchange(ref lockQueueHead, newLockQueueHead, old), old))
+				{
+					return;
+				}
+			}
+			goto start;
+			
+			
+
 		}
 	}
 }
