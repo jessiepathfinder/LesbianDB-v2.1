@@ -302,28 +302,36 @@ namespace LesbianDB
 				}
 			}
 		}
-		private async void Reconnect(){
-			await locker.AcquireWriterLock();
-			try{
-				DealWithDefunctDatabaseEngine(databaseEngine);
-				if (asyncCreateDatabaseEngine)
-				{
-					databaseEngine = await ((Func<Task<IDatabaseEngine>>)databaseEngineFactory)();
-				} else{
-					databaseEngine = ((Func<IDatabaseEngine>) databaseEngineFactory)();
-				}
-			} finally{
-				locker.ReleaseWriterLock();
-			}
-		}
+		private readonly AsyncMutex reconnectLocker = new AsyncMutex();
 		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
 		{
+		start:
 			await locker.AcquireReaderLock();
 			try{
 				return await databaseEngine.Execute(reads, conditions, writes);
 			}
 			catch{
-				Reconnect();
+				await reconnectLocker.Enter();
+				try
+				{
+					DealWithDefunctDatabaseEngine(databaseEngine);
+					if (asyncCreateDatabaseEngine)
+					{
+						databaseEngine = await ((Func<Task<IDatabaseEngine>>)databaseEngineFactory)();
+					}
+					else
+					{
+						databaseEngine = ((Func<IDatabaseEngine>)databaseEngineFactory)();
+					}
+				}
+				finally
+				{
+					reconnectLocker.Exit();
+				}
+				if(writes.Count == 0){
+					//If we are not writing shit
+					goto start;
+				}
 				throw;
 			}
 			finally{
@@ -372,9 +380,18 @@ namespace LesbianDB
 			remoteDatabaseEngine.ReceiveEventLoop();
 			return remoteDatabaseEngine;
 		}
-		private async void StartTimeout(string id, CancellationTokenSource cancellationTokenSource)
+		private async void StartTimeout(string id, CancellationTokenSource cancellationTokenSource, CancellationToken cancellationToken)
 		{
-			await Task.Delay(5000);
+			try{
+				await Task.Delay(5000, cancellationToken);
+			} catch(OperationCanceledException e){
+				cancellationTokenSource.Cancel();
+				if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource1))
+				{
+					taskCompletionSource1.SetException(e);
+				}
+				return;
+			}
 			cancellationTokenSource.Cancel();
 			if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
 			{
@@ -394,9 +411,6 @@ namespace LesbianDB
 				try
 				{
 					await clientWebSocket.SendAsync(bytes.AsMemory(0, len), WebSocketMessageType.Text, true, cancellationToken);
-				}
-				catch (OperationCanceledException){
-					return;
 				}
 				finally
 				{
@@ -428,7 +442,7 @@ namespace LesbianDB
 
 			//One of these might complete first
 			CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
-			StartTimeout(packet.id, cancellationTokenSource);
+			StartTimeout(packet.id, cancellationTokenSource, this.cancellationTokenSource.Token);
 			SendImpl(json, packet.id, cancellationTokenSource.Token);
 			return taskCompletionSource.Task;
 			
@@ -464,7 +478,7 @@ namespace LesbianDB
 						taskCompletionSource.SetResult(reply.result);
 					}
 				}
-			} catch{
+			} catch {
 				
 			}
 			finally
@@ -473,6 +487,11 @@ namespace LesbianDB
 				try{
 					await clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Jessie Lesbian is cute!", default);
 					clientWebSocket.Dispose();
+					if (Interlocked.Exchange(ref disposed, 1) == 0)
+					{
+						GC.SuppressFinalize(this);
+						cancellationTokenSource.Cancel();
+					}
 					cancellationTokenSource.Dispose();
 				} finally{
 					asyncMutex.Exit();
