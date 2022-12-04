@@ -364,11 +364,11 @@ namespace LesbianDB
 			return keyValuePairs.GetOrAdd(key, await underlying.Read(key));
 		}
 
-		public async Task Write(string key, string value)
+		public Task Write(string key, string value)
 		{
 			Task task = underlying.Read(key);
 			Hash(key)[key] = value;
-			await task;
+			return task;
 		}
 	}
 }

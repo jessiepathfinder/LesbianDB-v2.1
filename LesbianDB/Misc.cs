@@ -51,6 +51,13 @@ namespace LesbianDB
 			}
 			pendingHeavyTask.taskCompletionSource.SetResult(res);
 		}
+		public static async void BackgroundAwait(Task tsk){
+			await tsk;
+		}
+		public static async void BackgroundAwait(ValueTask tsk)
+		{
+			await tsk;
+		}
 		public static int HashString2(string str){
 			int len = Encoding.UTF8.GetByteCount(str);
 			if(len > 1008){

@@ -251,6 +251,91 @@ namespace LesbianDB
 			return readResults;
 		}
 	}
+	public sealed class ReconnectingDatabaseEngine : IDatabaseEngine, IAsyncDisposable
+	{
+		private IDatabaseEngine databaseEngine;
+		private readonly object databaseEngineFactory;
+		private readonly bool asyncCreateDatabaseEngine;
+		private volatile int disposed;
+		public ReconnectingDatabaseEngine(Func<IDatabaseEngine> databaseEngineFactory){
+			this.databaseEngineFactory = databaseEngineFactory;
+			databaseEngine = databaseEngineFactory();
+		}
+		private ReconnectingDatabaseEngine(Func<Task<IDatabaseEngine>> databaseEngineFactory, IDatabaseEngine initial)
+		{
+			this.databaseEngineFactory = databaseEngineFactory;
+			databaseEngine = initial;
+			asyncCreateDatabaseEngine = true;
+		}
+		private static void DealWithDefunctDatabaseEngine(object databaseEngine){
+			if(databaseEngine is IAsyncDisposable asyncDisposable){
+				Misc.BackgroundAwait(asyncDisposable.DisposeAsync());
+			} else if(databaseEngine is IDisposable disposable){
+				disposable.Dispose();
+			}
+		}
+		public static async Task<ReconnectingDatabaseEngine> CreateAsync(Func<Task<IDatabaseEngine>> databaseEngineFactory)
+		{
+			return new ReconnectingDatabaseEngine(databaseEngineFactory, await databaseEngineFactory());
+		}
+
+		private readonly AsyncReaderWriterLock locker = new AsyncReaderWriterLock();
+		public async ValueTask DisposeAsync()
+		{
+			if(Interlocked.Exchange(ref disposed, 1) == 0){
+				GC.SuppressFinalize(this);
+				await locker.AcquireWriterLock();
+				try
+				{
+					if (databaseEngine is IAsyncDisposable asyncDisposable)
+					{
+						await asyncDisposable.DisposeAsync();
+					}
+					else if (databaseEngine is IDisposable disposable)
+					{
+						disposable.Dispose();
+					}
+				}
+				finally
+				{
+					locker.ReleaseWriterLock();
+				}
+			}
+		}
+		private async void Reconnect(){
+			await locker.AcquireWriterLock();
+			try{
+				DealWithDefunctDatabaseEngine(databaseEngine);
+				if (asyncCreateDatabaseEngine)
+				{
+					databaseEngine = await ((Func<Task<IDatabaseEngine>>)databaseEngineFactory)();
+				} else{
+					databaseEngine = ((Func<IDatabaseEngine>) databaseEngineFactory)();
+				}
+			} finally{
+				locker.ReleaseWriterLock();
+			}
+		}
+		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+		{
+			await locker.AcquireReaderLock();
+			try{
+				return await databaseEngine.Execute(reads, conditions, writes);
+			}
+			catch{
+				Reconnect();
+				throw;
+			}
+			finally{
+				locker.ReleaseReaderLock();
+			}
+		}
+		~ReconnectingDatabaseEngine(){
+			if(Interlocked.Exchange(ref disposed, 1) == 0){
+				DealWithDefunctDatabaseEngine(databaseEngine);
+			}
+		}
+	}
 
 	public sealed class RemoteDatabaseEngine : IDatabaseEngine, IDisposable{
 		[JsonObject(MemberSerialization.Fields)]
