@@ -77,18 +77,22 @@ namespace LesbianDB.Tests
 			}
 		}
 		[Test]
-		public async Task PersistedYuriOptimismCounter(){
-			await using PersistedAsyncDictionary enhancedAsyncDictionary = new PersistedAsyncDictionary();
-			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(enhancedAsyncDictionary), 0);
+		public async Task LevelDBOptimismCounter()
+		{
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new LevelDBEngine(Misc.GetRandomFileName()), 0);
 			for (int i = 0; i < 4096;)
 			{
 				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 			}
 		}
 		[Test]
-		public async Task LevelDBOptimismCounter()
+		public async Task RemoteOptimismCounter()
 		{
-			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new LevelDBEngine(Misc.GetRandomFileName()), 0);
+			string url = Environment.GetEnvironmentVariable("LesbianDB_TestRemoteDatabase");
+			if(url is null){
+				Assert.Inconclusive();
+			}
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(await RemoteDatabaseEngine.Connect(new Uri(url), default), 0);
 			for (int i = 0; i < 4096;)
 			{
 				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
@@ -129,6 +133,28 @@ namespace LesbianDB.Tests
 			int value = Convert.ToInt32(await optimisticExecutionScope.Read("counter"));
 			optimisticExecutionScope.Write("counter", (value + 1).ToString());
 			return value;
+		}
+	}
+	public static class BuyBitcoinExample{
+		private static readonly OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 268435456);
+		/// <summary>
+		/// A well-written optimistic function
+		/// </summary>
+		public static Task<string> BuyBitcoin(ulong userid, decimal amount, decimal price)
+		{
+			string struserid = userid.ToString();
+			decimal output = amount / price;
+			string usdBalanceKey = struserid + ".balance.usd";
+			string bitcoinBalanceKey = struserid + ".balance.bitcoin";
+			return optimisticExecutionManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				decimal newusdbalance = Convert.ToDecimal(await optimisticExecutionScope.Read(usdBalanceKey)) - amount;
+				if(newusdbalance < 0){
+					return "insufficent USD balance!";
+				}
+				optimisticExecutionScope.Write(usdBalanceKey, newusdbalance.ToString());
+				optimisticExecutionScope.Write(bitcoinBalanceKey, (Convert.ToDecimal(bitcoinBalanceKey) + output).ToString());
+				return "successfully purchased bitcoin!";
+			});
 		}
 	}
 }

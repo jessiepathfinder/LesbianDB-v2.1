@@ -287,14 +287,16 @@ namespace LesbianDB
 			remoteDatabaseEngine.ReceiveEventLoop();
 			return remoteDatabaseEngine;
 		}
-		private async void StartTimeout(string id){
+		private async void StartTimeout(string id, CancellationTokenSource cancellationTokenSource)
+		{
 			await Task.Delay(5000);
+			cancellationTokenSource.Cancel();
 			if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
 			{
 				taskCompletionSource.SetException(new TimeoutException("The database transaction took too long!"));
 			}
 		}
-		private async void SendImpl(string json, string id)
+		private async void SendImpl(string json, string id, CancellationToken cancellationToken)
 		{
 			byte[] bytes = null;
 			try
@@ -306,7 +308,10 @@ namespace LesbianDB
 				await asyncMutex.Enter();
 				try
 				{
-					await clientWebSocket.SendAsync(bytes.AsMemory(0, len), WebSocketMessageType.Text, true, default);
+					await clientWebSocket.SendAsync(bytes.AsMemory(0, len), WebSocketMessageType.Text, true, cancellationToken);
+				}
+				catch (OperationCanceledException){
+					return;
 				}
 				finally
 				{
@@ -337,8 +342,9 @@ namespace LesbianDB
 			completionSources.TryAdd(packet.id, taskCompletionSource);
 
 			//One of these might complete first
-			StartTimeout(packet.id);
-			SendImpl(json, packet.id);
+			CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+			StartTimeout(packet.id, cancellationTokenSource);
+			SendImpl(json, packet.id, cancellationTokenSource.Token);
 			return taskCompletionSource.Task;
 			
 		}
