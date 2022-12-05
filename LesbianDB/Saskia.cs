@@ -66,7 +66,6 @@ namespace LesbianDB
 				try{
 					bytes = Misc.arrayPool.Rent(len);
 					await stream.ReadAsync(bytes, 0, len);
-					stream.Seek(0, SeekOrigin.Begin);
 					FlushAndReturn(stream, readStreams);
 				} catch{
 					if(bytes is { }){
@@ -81,6 +80,7 @@ namespace LesbianDB
 		}
 		private static async void FlushAndReturn(Stream str, ConcurrentBag<Stream> recycler){
 			await str.FlushAsync();
+			str.Seek(0, SeekOrigin.Begin);
 			recycler.Add(str);
 		}
 	}
@@ -147,13 +147,18 @@ namespace LesbianDB
 		{
 			this.swapHandle = swapHandle ?? throw new ArgumentNullException(nameof(swapHandle));
 		}
+		public EnhancedSequentialAccessDictionary(ISwapHandle swapHandle, bool preflushed)
+		{
+			this.swapHandle = swapHandle ?? throw new ArgumentNullException(nameof(swapHandle));
+			flushed = preflushed;
+		}
 		public EnhancedSequentialAccessDictionary(){
 			
 		}
-
 		public async Task Flush()
 		{
-			if(cache.IsEmpty){
+			if (cache.IsEmpty)
+			{
 				return;
 			}
 			await locker.AcquireWriterLock();
@@ -174,28 +179,47 @@ namespace LesbianDB
 					}
 					if (flushed)
 					{
-						using Stream stream = new DeflateStream(swapHandle is null ? new MemoryStream(bytes, 0, length, false, false) : await swapHandle.Get(), CompressionMode.Decompress, false);
-						using BsonDataReader bsonDataReader = new BsonDataReader(stream);
-						bsonDataReader.ReadRootValueAsArray = true;
-						GC.SuppressFinalize(bsonDataReader);
-						bsonDataReader.Read();
-						while (true)
+						MemoryStream memoryStream1;
+						if (swapHandle is null)
 						{
-							string temp = bsonDataReader.ReadAsString();
-							if (temp is null)
+							memoryStream1 = new MemoryStream(bytes, 0, length, false, false);
+						}
+						else
+						{
+							memoryStream1 = await swapHandle.Get();
+							if (memoryStream1.Length == 0)
 							{
-								break;
-							}
-							if (cache.ContainsKey(temp))
-							{
-								bsonDataReader.Read();
-							} else{
-								bsonDataWriter.WriteValue(temp);
-								bsonDataWriter.WriteValue(bsonDataReader.ReadAsString());
+								memoryStream1.Dispose();
+								goto doneflush;
 							}
 						}
+#pragma warning disable IDE0063 // Use simple 'using' statement
+						using (Stream stream = new DeflateStream(memoryStream1, CompressionMode.Decompress, false)){
+#pragma warning restore IDE0063 // Use simple 'using' statement
+							using BsonDataReader bsonDataReader = new BsonDataReader(stream);
+							bsonDataReader.ReadRootValueAsArray = true;
+							GC.SuppressFinalize(bsonDataReader);
+							bsonDataReader.Read();
+							while (true)
+							{
+								string temp = bsonDataReader.ReadAsString();
+								if (temp is null)
+								{
+									break;
+								}
+								if (cache.ContainsKey(temp))
+								{
+									bsonDataReader.Read();
+								} else{
+									bsonDataWriter.WriteValue(temp);
+									bsonDataWriter.WriteValue(bsonDataReader.ReadAsString());
+								}
+							}	
+						}
 					}
+				doneflush:
 					bsonDataWriter.WriteEndArray();
+					bsonDataWriter.Flush();
 				}
 				cache.Clear();
 				flushed = true;
@@ -214,6 +238,7 @@ namespace LesbianDB
 
 		public async Task<string> Read(string key)
 		{
+			Console.WriteLine("Attempted underlying read: " + key);
 			await locker.AcquireReaderLock();
 			try{
 				if (cache.TryGetValue(key, out string value))
@@ -221,12 +246,29 @@ namespace LesbianDB
 					return value;
 				}
 				if(flushed){
-					using Stream stream = new DeflateStream(swapHandle is null ? new MemoryStream(bytes, 0, length, false, false) : await swapHandle.Get(), CompressionMode.Decompress, false);
+					Console.WriteLine("FlushedRead");
+					Stream memoryStream1;
+					if (swapHandle is null)
+					{
+						memoryStream1 = new MemoryStream(bytes, 0, length, false, false);
+					}
+					else
+					{
+						memoryStream1 = await swapHandle.Get();
+						if (memoryStream1.Length == 0)
+						{
+							memoryStream1.Dispose();
+							Console.WriteLine("Empty memstream!");
+							return null;
+						}
+					}
+					using Stream stream = new DeflateStream(memoryStream1, CompressionMode.Decompress, false);
 					using BsonDataReader bsonDataReader = new BsonDataReader(stream);
 					GC.SuppressFinalize(bsonDataReader);
 					bsonDataReader.ReadRootValueAsArray = true;
 					bsonDataReader.Read();
 					while (true){
+						Console.WriteLine("Attempt underlying read");
 						string temp = bsonDataReader.ReadAsString();
 						if(temp is null){
 							return null;
@@ -256,7 +298,7 @@ namespace LesbianDB
 			}
 		}
 	}
-	public sealed class RandomFlushingCache : IFlushableAsyncDictionary{
+	public sealed class RandomFlushingCache : IFlushableAsyncDictionary, IAsyncDisposable{
 		private readonly IFlushableAsyncDictionary[] flushableAsyncDictionaries = new IFlushableAsyncDictionary[65536];
 		private static byte Random(out ushort rnd2){
 			Span<byte> bytes = stackalloc byte[3];
@@ -267,28 +309,41 @@ namespace LesbianDB
 		}
 
 		private readonly bool userandomhash;
+		private readonly Task evictionLoop;
 		public RandomFlushingCache(Func<IFlushableAsyncDictionary> func, long softMemoryLimit, bool userandomhash)
 		{
 			for(int i = 0; i < 65536; ){
 				flushableAsyncDictionaries[i++] = func();
 			}
 			this.userandomhash = userandomhash;
-			EvictionLoop(new WeakReference<IFlushableAsyncDictionary[]>(flushableAsyncDictionaries, false), softMemoryLimit);
+			evictionLoop = EvictionLoop(new WeakReference<IFlushableAsyncDictionary[]>(flushableAsyncDictionaries, false), softMemoryLimit, cancellationTokenSource.Token);
+			Misc.BackgroundAwait(evictionLoop);
 		}
 		private IFlushableAsyncDictionary Hash(string key){
 			return flushableAsyncDictionaries[(userandomhash ? ("Minecraft Alex is lesbian" + key).GetHashCode() : Misc.HashString2(key)) & 65535];
 		}
-
-		private static async void EvictionLoop(WeakReference<IFlushableAsyncDictionary[]> weakReference, long softMemoryLimit){
+		private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+		private static async Task EvictionLoop(WeakReference<IFlushableAsyncDictionary[]> weakReference, long softMemoryLimit, CancellationToken cancellationToken){
 		start:
 			byte rnd = Random(out ushort select);
 			if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
 			{
-				await Task.Delay(1);
+				try{
+					await Task.Delay(1, cancellationToken);
+				} catch(OperationCanceledException){
+					return;
+				}
 			}
 			else
 			{
-				await Task.Delay(rnd + 1);
+				try
+				{
+					await Task.Delay(rnd + 1, cancellationToken);
+				}
+				catch (OperationCanceledException)
+				{
+					return;
+				}
 			}
 			if (weakReference.TryGetTarget(out IFlushableAsyncDictionary[] array))
 			{
@@ -316,6 +371,16 @@ namespace LesbianDB
 		public Task Write(string key, string value)
 		{
 			return Hash(key).Write(key, value);
+		}
+
+		private volatile int disposed;
+		public async ValueTask DisposeAsync()
+		{
+			if(Interlocked.Exchange(ref disposed, 1) == 0){
+				cancellationTokenSource.Cancel();
+				await evictionLoop;
+				await Flush();
+			}
 		}
 	}
 	public sealed class RandomReplacementWriteThroughCache : IAsyncDictionary{
@@ -366,7 +431,7 @@ namespace LesbianDB
 
 		public Task Write(string key, string value)
 		{
-			Task task = underlying.Read(key);
+			Task task = underlying.Write(key, value);
 			Hash(key)[key] = value;
 			return task;
 		}

@@ -302,19 +302,13 @@ namespace LesbianDB
 				}
 			}
 		}
-		private readonly AsyncMutex reconnectLocker = new AsyncMutex();
-		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
-		{
-		start:
-			await locker.AcquireReaderLock();
-			try{
-				return await databaseEngine.Execute(reads, conditions, writes);
-			}
-			catch{
-				await reconnectLocker.Enter();
-				try
+		private async void Reconnect(IDatabaseEngine oldDatabaseEngine){
+			await locker.AcquireWriterLock();
+			try
+			{
+				if (ReferenceEquals(oldDatabaseEngine, databaseEngine))
 				{
-					DealWithDefunctDatabaseEngine(databaseEngine);
+					DealWithDefunctDatabaseEngine(oldDatabaseEngine);
 					if (asyncCreateDatabaseEngine)
 					{
 						databaseEngine = await ((Func<Task<IDatabaseEngine>>)databaseEngineFactory)();
@@ -324,10 +318,21 @@ namespace LesbianDB
 						databaseEngine = ((Func<IDatabaseEngine>)databaseEngineFactory)();
 					}
 				}
-				finally
-				{
-					reconnectLocker.Exit();
-				}
+			}
+			finally
+			{
+				locker.ReleaseWriterLock();
+			}
+		}
+		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+		{
+		start:
+			await locker.AcquireReaderLock();
+			try{
+				return await databaseEngine.Execute(reads, conditions, writes);
+			}
+			catch{
+				Reconnect(databaseEngine);
 				if(writes.Count == 0){
 					//If we are not writing shit
 					goto start;

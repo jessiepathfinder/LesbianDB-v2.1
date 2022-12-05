@@ -41,7 +41,7 @@ namespace LesbianDB.Tests
 		[Test]
 		public async Task OnDiskSaskiaOptimismCounter()
 		{
-			EnhancedSequentialAccessDictionary dictionary = new EnhancedSequentialAccessDictionary(new FileSwapHandle());
+			EnhancedSequentialAccessDictionary dictionary = new EnhancedSequentialAccessDictionary(new FileSwapHandle(), true);
 			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(dictionary), 0);
 			for (int i = 0; i < 4096;)
 			{

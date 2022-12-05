@@ -9,6 +9,7 @@ using System.Threading;
 using System.Text;
 using Newtonsoft.Json;
 using System.Buffers;
+using System.Collections.Concurrent;
 
 namespace LesbianDB.Server
 {
@@ -63,6 +64,7 @@ namespace LesbianDB.Server
 			}
 			await YuriDatabaseEngine.RestoreBinlog(binlog, asyncDictionary);
 		}
+		private static volatile Action exit;
 		private static void Main(string[] args)
 		{
 			Console.WriteLine("LesbianDB v2.1 server\nMade by Jessie Lesbian (Discord: jessielesbian#8060)\n\nParsing arguments...");
@@ -74,8 +76,9 @@ namespace LesbianDB.Server
 			string engine = options.Engine.ToLower();
 			Console.WriteLine("Registering abort blockers...");
 			ManualResetEventSlim exitBlocker = new ManualResetEventSlim();
-			Action exit = null;
+			ManualResetEventSlim inhibitDomainExit = new ManualResetEventSlim();
 			Console.CancelKeyPress += (object obj, ConsoleCancelEventArgs e) => {
+				e.Cancel = true;
 				exitBlocker.Wait();
 				if (exit is { })
 				{
@@ -88,20 +91,19 @@ namespace LesbianDB.Server
 				{
 					exit();
 				}
+				inhibitDomainExit.Wait();
+				inhibitDomainExit.Dispose();
 			};
 			IDatabaseEngine databaseEngine;
+			Action closeLevelDB;
 			Stream binlog;
 			{
-				Console.WriteLine("Opening binlog...");
 				string binlogname = options.Binlog;
 				if(binlogname is null){
 					binlog = null;
 				} else{
+					Console.WriteLine("Opening binlog...");
 					binlog = new FileStream(binlogname, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.SequentialScan | FileOptions.Asynchronous);
-					OnExit += (object obj, EventArgs eventArgs) => {
-						Console.WriteLine("Closing binlog...");
-						binlog.Dispose();
-					};
 				}				
 			}
 			Console.WriteLine("Creating storage engine...");
@@ -109,6 +111,7 @@ namespace LesbianDB.Server
 			Task<LevelDBEngine> getDatabaseEngine;
 			ISwapAllocator yuriMalloc;
 			IAsyncDictionary asyncDictionary;
+			IAsyncDisposable finalFlush;
 			string persistdir = options.PersistDir;
 			if(persistdir is { }){
 				if (!persistdir.EndsWith(Path.DirectorySeparatorChar))
@@ -119,8 +122,10 @@ namespace LesbianDB.Server
 			string lockfile;
 			switch (engine){
 				case "yuri":
+					finalFlush = null;
 					lockfile = null;
 					getDatabaseEngine = null;
+					closeLevelDB = null;
 					yuriMalloc = CreateYuriMalloc(options);
 					int yuriBuckets = options.YuriBuckets;
 					asyncDictionary = yuriBuckets < 2 ? new SequentialAccessAsyncDictionary(yuriMalloc) : ((IAsyncDictionary)new ShardedAsyncDictionary(() => new SequentialAccessAsyncDictionary(yuriMalloc), yuriBuckets));
@@ -134,6 +139,8 @@ namespace LesbianDB.Server
 					break;
 				case "saskia":
 					getDatabaseEngine = null;
+					finalFlush = null;
+					closeLevelDB = null;
 					if (persistdir is null){
 						lockfile = null;
 						if(options.SaskiaZram){
@@ -158,14 +165,16 @@ namespace LesbianDB.Server
 							disposable = new FileStream(lockfile, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.SequentialScan);
 						} catch{
 							Console.Error.WriteLine("Unable to lock on-disk dictionary, maybe unclean shutdown? Please delete on-disk dictionary and restart if that's the case.");
-							return;
+							throw;
 						} finally{
 							if(disposable is { }){
 								disposable.Dispose();
 							}
 						}
 						persistdir += "saskia-";
-						asyncDictionary = new RandomFlushingCache(() => new EnhancedSequentialAccessDictionary(new FileSwapHandle(persistdir + count++)), options.SoftMemoryLimit, false);
+						RandomFlushingCache randomFlushingCache = new RandomFlushingCache(() => new EnhancedSequentialAccessDictionary(new FileSwapHandle(persistdir + count++), true), options.SoftMemoryLimit, false);
+						asyncDictionary = randomFlushingCache;
+						finalFlush = randomFlushingCache;
 						if (binlog is null)
 						{
 							load = null;
@@ -180,6 +189,7 @@ namespace LesbianDB.Server
 
 					break;
 				case "leveldb":
+					finalFlush = null;
 					lockfile = null;
 					if (persistdir is null){
 						throw new Exception("--persist-dir is mandatory for leveldb storage engine!");
@@ -187,13 +197,11 @@ namespace LesbianDB.Server
 					if(binlog is null){
 						load = null;
 						LevelDBEngine levelDBEngine = new LevelDBEngine(persistdir, options.SoftMemoryLimit);
-						OnExit += (object obj, EventArgs eventArgs) => {
-							Console.WriteLine("Closing LevelDB on-disk dictionary...");
-							levelDBEngine.Dispose();
-						};
+						closeLevelDB = levelDBEngine.Dispose;
 						databaseEngine = levelDBEngine;
 						getDatabaseEngine = null;
 					} else{
+						closeLevelDB = null;
 						getDatabaseEngine = LevelDBEngine.RestoreBinlog(binlog, persistdir, options.SoftMemoryLimit);
 						load = null;
 						databaseEngine = null;
@@ -207,87 +215,100 @@ namespace LesbianDB.Server
 			HttpListener httpListener = new HttpListener();
 			httpListener.Prefixes.Add(options.Listen);
 			AsyncReaderWriterLock exitLock = new AsyncReaderWriterLock();
-			Task coreloop = null;
 			int exithandled = 0;
+			TaskCompletionSource<HttpListenerContext> abortSource = new TaskCompletionSource<HttpListenerContext>();
+
+
+			Console.WriteLine("Starting HTTP listener...");
+			httpListener.Start();
+			Task coreloop = Main3(httpListener, load, getDatabaseEngine, databaseEngine, exitLock, abortSource.Task);
+			Console.WriteLine("Redefining abort handler..");
 			exit = () => {
-				try{
-					
-				} finally{
+				try
+				{
+
+				}
+				finally
+				{
 					if (Interlocked.Exchange(ref exithandled, 1) == 1)
 					{
 						goto end;
 					}
 					Console.WriteLine("Exitting...");
+					exitBlocker.Wait();
 					if (httpListener.IsListening)
 					{
 						Console.WriteLine("Stopping HTTP listener...");
 						httpListener.Stop();
 					}
-					if (coreloop is { })
+					Console.WriteLine("Waiting for core loop to exit...");
+					abortSource.SetException(new Exception());
+					coreloop.Wait();
+					if(binlog is { }){
+						Console.WriteLine("Closing binlog...");
+						binlog.Dispose();
+					}	
+					if (closeLevelDB is { })
 					{
-						Console.WriteLine("Waiting for core loop to exit...");
-						coreloop.Wait();
+						Console.WriteLine("Closing LevelDB on-disk dictionary...");
+						closeLevelDB();
 					}
-					Console.WriteLine("Waiting for all pending queries to complete...");
-					exitLock.AcquireWriterLock().Wait();
-					exitflag = true;
-					exitLock.ReleaseWriterLock();
-					EventHandler exitEventHandler = OnExit;
-					if (exitEventHandler is { })
+					else if (finalFlush is { })
 					{
-						Console.WriteLine("Closing other resources...");
-						exitEventHandler(null, new EventArgs());
-					}
-					if (lockfile is { })
-					{
+						Console.WriteLine("Flushing Saskia on-disk dictionary...");
+						finalFlush.DisposeAsync().AsTask().Wait();
 						Console.WriteLine("Releasing Saskia on-disk dictionary lock...");
 						File.Delete(lockfile);
 					}
+					inhibitDomainExit.Set();
+
 				end:;
 				}
 			};
-			Console.CancelKeyPress += (object sender, ConsoleCancelEventArgs e) => {
-				exit();
-			};
-			AppDomain.CurrentDomain.ProcessExit += (object sender, EventArgs e) => {
-				exit();
-			};
 			Console.WriteLine("Removing abort blockers...");
 			exitBlocker.Set();
-			Console.WriteLine("Starting HTTP listener...");
-			httpListener.Start();
-			coreloop = Main3(httpListener, load, getDatabaseEngine, databaseEngine, exitLock);
 			coreloop.Wait();
+			inhibitDomainExit.Wait();
 		}
-		private static event EventHandler OnExit;
-
-		private static async Task Main3(HttpListener httpListener, Task load, Task<LevelDBEngine> getLevelDBEngine, IDatabaseEngine databaseEngine, AsyncReaderWriterLock exitLock)
+		private static async Task Main3(HttpListener httpListener, Task load, Task<LevelDBEngine> getLevelDBEngine, IDatabaseEngine databaseEngine, AsyncReaderWriterLock exitLock, Task<HttpListenerContext> abort2)
 		{
-			if(databaseEngine is null){
-				Console.WriteLine("Loading binlog...");
-				LevelDBEngine levelDBEngine = await getLevelDBEngine;
-				databaseEngine = levelDBEngine;
-				OnExit += (object sender, EventArgs e) =>
-				{
-					Console.WriteLine("Closing LevelDB on-disk dictionary...");
-					levelDBEngine.Dispose();
-				};
-			}
-			if(load is { }){
-				Console.WriteLine("Loading binlog...");
-				await load;
-			}
-			Console.WriteLine("Done!");
-		start:
-			HttpListenerContext httpListenerContext;
+			Action disposeLevelDB = null;
 			try{
-				httpListenerContext = await httpListener.GetContextAsync();
-			} catch{
-				return;
-			}
-			if(httpListenerContext is { }){
-				HandleConnection(httpListenerContext, databaseEngine, exitLock);
-				goto start;
+				if (databaseEngine is null)
+				{
+					Console.WriteLine("Loading binlog...");
+					LevelDBEngine levelDBEngine = await getLevelDBEngine;
+					disposeLevelDB = levelDBEngine.Dispose;
+					databaseEngine = levelDBEngine;
+				}
+				if (load is { })
+				{
+					Console.WriteLine("Loading binlog...");
+					await load;
+				}
+				Console.WriteLine("Done!");
+				Task<HttpListenerContext>[] tasks = new Task<HttpListenerContext>[] {null, abort2};
+			start:
+				HttpListenerContext httpListenerContext;
+				try
+				{
+					tasks[0] = httpListener.GetContextAsync();
+					httpListenerContext = (await Task.WhenAny(tasks)).Result;
+				}
+				catch
+				{
+					return;
+				}
+				if (httpListenerContext is { })
+				{
+					HandleConnection(httpListenerContext, databaseEngine, exitLock);
+					goto start;
+				}
+			} finally{
+				if(disposeLevelDB is { }){
+					Console.WriteLine("Closing LevelDB on-disk dictionary...");
+					disposeLevelDB();
+				}
 			}
 		}
 		private static async void HandleConnection(HttpListenerContext httpListenerContext, IDatabaseEngine databaseEngine, AsyncReaderWriterLock exitLock)
@@ -371,7 +392,12 @@ namespace LesbianDB.Server
 		private static async void ExecuteQuery(byte[] bytes, int count, Encoding encoding, Action releaseDisconnectionLock, AsyncMutex asyncMutex, IDatabaseEngine databaseEngine, WebSocket webSocket, AsyncReaderWriterLock exitLock)
 		{
 			try{
-				Packet packet = JsonConvert.DeserializeObject<Packet>(encoding.GetString(bytes, 0, count));
+				Packet packet;
+				try{
+					packet = JsonConvert.DeserializeObject<Packet>(encoding.GetString(bytes, 0, count));
+				} catch{
+					return;
+				}
 				IReadOnlyDictionary<string, string> result;
 				await exitLock.AcquireReaderLock();
 				try{
