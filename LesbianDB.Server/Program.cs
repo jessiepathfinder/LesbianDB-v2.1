@@ -190,6 +190,7 @@ namespace LesbianDB.Server
 					break;
 				case "leveldb":
 					finalFlush = null;
+					asyncDictionary = null;
 					lockfile = null;
 					if (persistdir is null){
 						throw new Exception("--persist-dir is mandatory for leveldb storage engine!");
@@ -244,10 +245,14 @@ namespace LesbianDB.Server
 					Console.WriteLine("Waiting for core loop to exit...");
 					abortSource.SetException(new Exception());
 					coreloop.Wait();
-					if(binlog is { }){
+					long binlogHeight;
+					if(binlog is null){
+						binlogHeight = 0;
+					} else{
 						Console.WriteLine("Closing binlog...");
+						binlogHeight = binlog.Position;
 						binlog.Dispose();
-					}	
+					}
 					if (closeLevelDB is { })
 					{
 						Console.WriteLine("Closing LevelDB on-disk dictionary...");
@@ -255,6 +260,10 @@ namespace LesbianDB.Server
 					}
 					else if (finalFlush is { })
 					{
+						if(binlogHeight > 0){
+							Console.WriteLine("Writing fast-recovery checkpoint...");
+							asyncDictionary.Write("LesbianDB_reserved_binlog_height", binlogHeight.ToString()).Wait();
+						}
 						Console.WriteLine("Flushing Saskia on-disk dictionary...");
 						finalFlush.DisposeAsync().AsTask().Wait();
 						Console.WriteLine("Releasing Saskia on-disk dictionary lock...");
