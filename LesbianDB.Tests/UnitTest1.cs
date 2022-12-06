@@ -99,6 +99,24 @@ namespace LesbianDB.Tests
 			}
 		}
 		[Test]
+		public async Task SaskiaZramYuriBinlogOptimisticCounter()
+		{
+			using MemoryStream binlog = new MemoryStream();
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary(), binlog), 0);
+			for (int i = 0; i < 2048;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+			binlog.Seek(0, SeekOrigin.Begin);
+			EnhancedSequentialAccessDictionary dictionary = new EnhancedSequentialAccessDictionary();
+			await YuriDatabaseEngine.RestoreBinlog(binlog, dictionary);
+			optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(dictionary), 0);
+			for (int i = 2048; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+		}
+		[Test]
 		public async Task YuriBinlogLevelDBOptimismCounter()
 		{
 			using MemoryStream binlog = new MemoryStream();
@@ -127,7 +145,6 @@ namespace LesbianDB.Tests
 					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
 				}
 			}
-
 		}
 		private static async Task<int> IncrementOptimisticCounter(IOptimisticExecutionScope optimisticExecutionScope){
 			int value = Convert.ToInt32(await optimisticExecutionScope.Read("counter"));

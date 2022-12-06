@@ -134,7 +134,6 @@ namespace LesbianDB
 			Dictionary<string, Task<string>> conditionReads = new Dictionary<string, Task<string>>();
 
 			//binlog stuff
-			byte[] buffer = null;
 			Task writeBinlog = null;
 			bool binlocked = false;
 
@@ -186,17 +185,18 @@ namespace LesbianDB
 				{
 					int len;
 					JsonSerializer jsonSerializer = new JsonSerializer();
+					byte[] buffer;
 					using (MemoryStream memoryStream = new MemoryStream())
 					{
+						memoryStream.SetLength(4);
+						memoryStream.Seek(4, SeekOrigin.Begin);
 						using (Stream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true))
 						{
 							BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
 							jsonSerializer.Serialize(bsonDataWriter, writes);
 						}
 						len = (int)memoryStream.Position;
-						memoryStream.Seek(0, SeekOrigin.Begin);
-						buffer = Misc.arrayPool.Rent(len + 4);
-						memoryStream.Read(buffer, 4, len);
+						buffer = memoryStream.GetBuffer();
 					}
 					BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
 					binlocked = true;
@@ -215,26 +215,20 @@ namespace LesbianDB
 			}
 			finally
 			{
-				//Buffer is only allocated if we are binlogged
-				if (buffer is { })
+				if (binlocked)
 				{
-					//Buffer will always be created before binlog locking
-					if (binlocked)
+					try
 					{
-						try
+						//Binlog writing will always start after binlog locking
+						if (writeBinlog is { })
 						{
-							//Binlog writing will always start after binlog locking
-							if (writeBinlog is { })
-							{
-								await writeBinlog;
-							}
-						}
-						finally
-						{
-							binlogLock.Exit();
+							await writeBinlog;
 						}
 					}
-					Misc.arrayPool.Return(buffer, false);
+					finally
+					{
+						binlogLock.Exit();
+					}
 				}
 				foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 				{
