@@ -131,7 +131,6 @@ namespace LesbianDB
 			//Pending reads
 			Dictionary<string, Task<string>> pendingReads = new Dictionary<string, Task<string>>();
 			Dictionary<string, string> readResults = new Dictionary<string, string>();
-			Dictionary<string, Task<string>> conditionReads = new Dictionary<string, Task<string>>();
 
 			//binlog stuff
 			Task writeBinlog = null;
@@ -151,6 +150,9 @@ namespace LesbianDB
 			}
 			try
 			{
+				foreach (string read in conditions.Keys){
+					pendingReads.Add(read, asyncDictionary.Read(read));
+				}
 				foreach (string read in reads)
 				{
 					if (!pendingReads.ContainsKey(read))
@@ -158,35 +160,27 @@ namespace LesbianDB
 						pendingReads.Add(read, asyncDictionary.Read(read));
 					}
 				}
-				foreach (KeyValuePair<string, Task<string>> kvp in pendingReads)
+				foreach (string read in reads)
 				{
-					readResults.Add(kvp.Key, await kvp.Value);
-				}
-				foreach (KeyValuePair<string, string> kvp in conditions)
-				{
-					string key = kvp.Key;
-					if (!pendingReads.TryGetValue(key, out Task<string> tsk))
-					{
-						tsk = asyncDictionary.Read(key);
-					}
-					conditionReads.Add(kvp.Key, tsk);
+					readResults.TryAdd(read, await pendingReads[read]);
 				}
 				if(!write){
 					return readResults;
 				}
 				foreach (KeyValuePair<string, string> kvp in conditions)
 				{
-					if(kvp.Value != await conditionReads[kvp.Key]){
+					if(kvp.Value != await pendingReads[kvp.Key]){
 						return readResults;
 					}
 				}
+				writes = Misc.ScrubNoEffectWrites(writes, pendingReads);
 
 				if (binlog is { })
 				{
 					int len;
 					JsonSerializer jsonSerializer = new JsonSerializer();
 					byte[] buffer;
-					using (MemoryStream memoryStream = new MemoryStream())
+					using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
 					{
 						memoryStream.SetLength(4);
 						memoryStream.Seek(4, SeekOrigin.Begin);
@@ -454,7 +448,7 @@ namespace LesbianDB
 				jsonSerializer.MissingMemberHandling = MissingMemberHandling.Error;
 				CancellationToken cancellationToken = cancellationTokenSource.Token;
 				while(true){
-					using(MemoryStream memoryStream = new MemoryStream()){
+					using(PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool)){
 					read:
 						WebSocketReceiveResult recv = await clientWebSocket.ReceiveAsync(buffer, cancellationToken);
 						if (recv.MessageType.HasFlag(WebSocketMessageType.Close))
@@ -465,7 +459,6 @@ namespace LesbianDB
 						await memoryStream.WriteAsync(buffer, 0, len);
 						if (!recv.EndOfMessage)
 						{
-							memoryStream.Capacity += len;
 							goto read;
 						}
 						memoryStream.Seek(0, SeekOrigin.Begin);

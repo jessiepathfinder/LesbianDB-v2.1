@@ -163,7 +163,7 @@ namespace LesbianDB
 			}
 			await locker.AcquireWriterLock();
 			try{
-				using MemoryStream memoryStream = new MemoryStream();
+				using PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool);
 				using(DeflateStream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true)){
 					BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
 					GC.SuppressFinalize(bsonDataWriter);

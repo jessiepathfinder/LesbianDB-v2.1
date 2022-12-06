@@ -9,6 +9,7 @@ using System.Collections.Concurrent;
 using System.Threading;
 using System.Text;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 
 namespace LesbianDB
 {
@@ -53,6 +54,26 @@ namespace LesbianDB
 		}
 		public static async void BackgroundAwait(Task tsk){
 			await tsk;
+		}
+		/// <summary>
+		/// Used by LevelDB/Yuri database (NOT storage) engines to scrub away no-effect writes
+		/// </summary>
+		/// <param name="writes"></param>
+		/// <returns></returns>
+		public static IReadOnlyDictionary<string, string> ScrubNoEffectWrites(IReadOnlyDictionary<string, string> writes, IReadOnlyDictionary<string, Task<string>> reads){
+			Dictionary<string, string> rewritten = new Dictionary<string, string>();
+			foreach(KeyValuePair<string, string> keyValuePair in writes){
+				string key = keyValuePair.Key;
+				string value = keyValuePair.Value;
+				if(reads.TryGetValue(key, out Task<string> tsk)){
+					//Normally, this function is called on already completed tasks
+					if(tsk.Result == value){
+						continue;
+					}
+				}
+				rewritten.Add(key, value);
+			}
+			return rewritten;
 		}
 		public static async void BackgroundAwait(ValueTask tsk)
 		{

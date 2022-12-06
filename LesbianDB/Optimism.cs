@@ -66,11 +66,10 @@ namespace LesbianDB.Optimism.Core
 		private static readonly IReadOnlyDictionary<string, string> emptyDictionary = new Dictionary<string, string>();
 		private sealed class OptimisticExecutionScope : IOptimisticExecutionScope
 		{
-			private static readonly IReadOnlyDictionary<string, string> emptyStringDictionary = new Dictionary<string, string>();
-			private static readonly string[] emptyStringArray = new string[0];
 			private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions;
 			private readonly IDatabaseEngine databaseEngine;
 			public readonly ConcurrentDictionary<string, string> L1ReadCache = new ConcurrentDictionary<string, string>();
+			private static readonly string[] emptyStringArray = new string[0];
 			public readonly ConcurrentDictionary<string, string> L1WriteCache = new ConcurrentDictionary<string, string>();
 
 			public OptimisticExecutionScope(ConcurrentDictionary<string, string>[] optimisticCachePartitions, IDatabaseEngine databaseEngine)
@@ -84,7 +83,7 @@ namespace LesbianDB.Optimism.Core
 				return optimisticCachePartitions[("Lesbians are optimistic " + key).GetHashCode() & 255];
 			}
 			public async Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys){
-				IReadOnlyDictionary<string, string> read = await databaseEngine.Execute(keys, emptyStringDictionary, emptyStringDictionary);
+				IReadOnlyDictionary<string, string> read = await databaseEngine.Execute(keys, emptyDictionary, emptyDictionary);
 				foreach(KeyValuePair<string, string> keyValuePair in read){
 					string value = keyValuePair.Value;
 					if(L1ReadCache.GetOrAdd(keyValuePair.Key, value) != value){
@@ -129,7 +128,7 @@ namespace LesbianDB.Optimism.Core
 				ConcurrentDictionary<string, string> optimisticCachePartition = GetOptimisticCachePartition(key);
 				if (!optimisticCachePartition.TryGetValue(key, out string value))
 				{
-					value = optimisticCachePartition.GetOrAdd(key, (await databaseEngine.Execute(new string[] { key }, emptyStringDictionary, emptyStringDictionary))[key]);
+					value = optimisticCachePartition.GetOrAdd(key, (await databaseEngine.Execute(new string[] { key }, emptyDictionary, emptyDictionary))[key]);
 				}
 				value = L1ReadCache.GetOrAdd(key, value);
 
@@ -152,6 +151,11 @@ namespace LesbianDB.Optimism.Core
 				L1WriteCache[key] = value;
 			}
 		}
+		private static IEnumerable<string> GetKeys(KeyValuePair<string, string>[] keyValuePairs){
+			foreach(KeyValuePair<string, string> keyValuePair in keyValuePairs){
+				yield return keyValuePair.Key;
+			}
+		}
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction){
 			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngine);
 		start:
@@ -159,7 +163,10 @@ namespace LesbianDB.Optimism.Core
 			try{
 				ret = await optimisticFunction(optimisticExecutionScope);
 			} catch(OptimisticFault){
-				optimisticExecutionScope.L1ReadCache.Clear();
+				foreach(KeyValuePair<string, string> keyValuePair in await databaseEngine.Execute(GetKeys(optimisticExecutionScope.L1ReadCache.ToArray()), emptyDictionary, emptyDictionary))
+				{
+					optimisticExecutionScope.L1ReadCache[keyValuePair.Key] = keyValuePair.Value;
+				}
 				optimisticExecutionScope.L1WriteCache.Clear();
 				goto start;
 			}

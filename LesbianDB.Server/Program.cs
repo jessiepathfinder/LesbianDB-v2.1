@@ -339,7 +339,7 @@ namespace LesbianDB.Server
 				{
 					buffer = arrayPool.Rent(65536);
 				start:
-					using (MemoryStream memoryStream = new MemoryStream()){
+					using (PooledMemoryStream memoryStream = new PooledMemoryStream(arrayPool)){
 						while (true)
 						{
 							WebSocketReceiveResult webSocketReceiveResult = await webSocket.ReceiveAsync(buffer, default);

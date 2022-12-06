@@ -247,6 +247,7 @@ namespace LesbianDB
 						return returns;
 					}
 				}
+				writes = Misc.ScrubNoEffectWrites(writes, keyValuePairs);
 				WriteOptions writeOptions;
 				long binpos;
 				if (binlog is { })
@@ -254,7 +255,7 @@ namespace LesbianDB
 					int len;
 					byte[] buffer;
 					JsonSerializer jsonSerializer = new JsonSerializer();
-					using (MemoryStream memoryStream = new MemoryStream())
+					using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
 					{
 						memoryStream.SetLength(4);
 						memoryStream.Seek(0, SeekOrigin.End);
