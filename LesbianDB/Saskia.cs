@@ -238,7 +238,6 @@ namespace LesbianDB
 
 		public async Task<string> Read(string key)
 		{
-			Console.WriteLine("Attempted underlying read: " + key);
 			await locker.AcquireReaderLock();
 			try{
 				if (cache.TryGetValue(key, out string value))
@@ -246,7 +245,6 @@ namespace LesbianDB
 					return value;
 				}
 				if(flushed){
-					Console.WriteLine("FlushedRead");
 					Stream memoryStream1;
 					if (swapHandle is null)
 					{
@@ -258,7 +256,6 @@ namespace LesbianDB
 						if (memoryStream1.Length == 0)
 						{
 							memoryStream1.Dispose();
-							Console.WriteLine("Empty memstream!");
 							return null;
 						}
 					}
@@ -268,7 +265,6 @@ namespace LesbianDB
 					bsonDataReader.ReadRootValueAsArray = true;
 					bsonDataReader.Read();
 					while (true){
-						Console.WriteLine("Attempt underlying read");
 						string temp = bsonDataReader.ReadAsString();
 						if(temp is null){
 							return null;
