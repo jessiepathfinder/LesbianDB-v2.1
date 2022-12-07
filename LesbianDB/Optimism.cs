@@ -160,15 +160,21 @@ namespace LesbianDB.Optimism.Core
 			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngine);
 		start:
 			T ret;
+			Exception exception = null;
 			try{
 				ret = await optimisticFunction(optimisticExecutionScope);
-			} catch(OptimisticFault){
-				foreach(KeyValuePair<string, string> keyValuePair in await databaseEngine.Execute(GetKeys(optimisticExecutionScope.L1ReadCache.ToArray()), emptyDictionary, emptyDictionary))
-				{
-					optimisticExecutionScope.L1ReadCache[keyValuePair.Key] = keyValuePair.Value;
+			} catch(Exception e){
+				if(e is OptimisticFault){
+					foreach (KeyValuePair<string, string> keyValuePair in await databaseEngine.Execute(GetKeys(optimisticExecutionScope.L1ReadCache.ToArray()), emptyDictionary, emptyDictionary))
+					{
+						optimisticExecutionScope.L1ReadCache[keyValuePair.Key] = keyValuePair.Value;
+					}
+					optimisticExecutionScope.L1WriteCache.Clear();
+					goto start;
+				} else{
+					ret = default;
+					exception = e;
 				}
-				optimisticExecutionScope.L1WriteCache.Clear();
-				goto start;
 			}
 			//Conditions
 			Dictionary<string, string> reads = new Dictionary<string, string>(optimisticExecutionScope.L1ReadCache.ToArray());
@@ -200,7 +206,12 @@ namespace LesbianDB.Optimism.Core
 					string key = kvp.Key;
 					GetOptimisticCachePartition(key)[key] = kvp.Value;
 				}
-				return ret;
+
+				if(exception is null){
+					return ret;
+				} else{
+					throw exception;
+				}
 			}
 			else
 			{
