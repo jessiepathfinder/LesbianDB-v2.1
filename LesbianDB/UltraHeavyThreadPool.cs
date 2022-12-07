@@ -26,10 +26,12 @@ namespace LesbianDB
 			if (!threadPool.TryTake(out BlockingCollection<Action> blockingCollection))
 			{
 				blockingCollection = new BlockingCollection<Action>();
-				Thread thread = new Thread(ExecutorThread);
-				thread.IsBackground = true;
-				thread.Name = "Ultra heavy worker thread #" + Interlocked.Increment(ref count);
-				thread.Priority = ThreadPriority.Lowest;
+				Thread thread = new Thread(ExecutorThread)
+				{
+					IsBackground = true,
+					Name = "Ultra heavy worker thread #" + Interlocked.Increment(ref count),
+					Priority = ThreadPriority.Lowest
+				};
 				thread.Start(blockingCollection);
 			}
 			blockingCollection.Add(action);

@@ -39,7 +39,7 @@ namespace LesbianDB.Server
 			[Option("saskia.zram", Required = false, HelpText = "Tells the Saskia storage engine to use zram instead of YuriMalloc for swapping cold data (no effect if persist-dir is specified or yuri/leveldb storage engine is used).", Default = false)]
 			public bool SaskiaZram { get; set; }
 		}
-		private static ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();
+		private static readonly ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();
 		private static ISwapAllocator CreateYuriMalloc(Options options)
 		{
 			int count = options.YuriMallocBuckets;
@@ -245,6 +245,13 @@ namespace LesbianDB.Server
 					Console.WriteLine("Waiting for core loop to exit...");
 					abortSource.SetException(new Exception());
 					coreloop.Wait();
+					Console.WriteLine("Waiting for all queries to complete...");
+					exitLock.AcquireWriterLock().Wait();
+					try{
+						exitflag = true;
+					} finally{
+						exitLock.ReleaseWriterLock();
+					}
 					long binlogHeight;
 					if(binlog is null){
 						binlogHeight = 0;
@@ -325,7 +332,7 @@ namespace LesbianDB.Server
 			HttpListenerWebSocketContext httpListenerWebSocketContext;
 			try{
 				httpListenerWebSocketContext = await httpListenerContext.AcceptWebSocketAsync("LesbianDB-v2.1");
-			} catch{
+			} catch (Exception e){
 				httpListenerContext.Response.Abort();
 				return;
 			}

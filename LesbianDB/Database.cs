@@ -239,104 +239,6 @@ namespace LesbianDB
 			return readResults;
 		}
 	}
-	public sealed class ReconnectingDatabaseEngine : IDatabaseEngine, IAsyncDisposable
-	{
-		private IDatabaseEngine databaseEngine;
-		private readonly object databaseEngineFactory;
-		private readonly bool asyncCreateDatabaseEngine;
-		private volatile int disposed;
-		public ReconnectingDatabaseEngine(Func<IDatabaseEngine> databaseEngineFactory){
-			this.databaseEngineFactory = databaseEngineFactory;
-			databaseEngine = databaseEngineFactory();
-		}
-		private ReconnectingDatabaseEngine(Func<Task<IDatabaseEngine>> databaseEngineFactory, IDatabaseEngine initial)
-		{
-			this.databaseEngineFactory = databaseEngineFactory;
-			databaseEngine = initial;
-			asyncCreateDatabaseEngine = true;
-		}
-		private static void DealWithDefunctDatabaseEngine(object databaseEngine){
-			if(databaseEngine is IAsyncDisposable asyncDisposable){
-				Misc.BackgroundAwait(asyncDisposable.DisposeAsync());
-			} else if(databaseEngine is IDisposable disposable){
-				disposable.Dispose();
-			}
-		}
-		public static async Task<ReconnectingDatabaseEngine> CreateAsync(Func<Task<IDatabaseEngine>> databaseEngineFactory)
-		{
-			return new ReconnectingDatabaseEngine(databaseEngineFactory, await databaseEngineFactory());
-		}
-
-		private readonly AsyncReaderWriterLock locker = new AsyncReaderWriterLock();
-		public async ValueTask DisposeAsync()
-		{
-			if(Interlocked.Exchange(ref disposed, 1) == 0){
-				GC.SuppressFinalize(this);
-				await locker.AcquireWriterLock();
-				try
-				{
-					if (databaseEngine is IAsyncDisposable asyncDisposable)
-					{
-						await asyncDisposable.DisposeAsync();
-					}
-					else if (databaseEngine is IDisposable disposable)
-					{
-						disposable.Dispose();
-					}
-				}
-				finally
-				{
-					locker.ReleaseWriterLock();
-				}
-			}
-		}
-		private async void Reconnect(IDatabaseEngine oldDatabaseEngine){
-			await locker.AcquireWriterLock();
-			try
-			{
-				if (ReferenceEquals(oldDatabaseEngine, databaseEngine))
-				{
-					DealWithDefunctDatabaseEngine(oldDatabaseEngine);
-					if (asyncCreateDatabaseEngine)
-					{
-						databaseEngine = await ((Func<Task<IDatabaseEngine>>)databaseEngineFactory)();
-					}
-					else
-					{
-						databaseEngine = ((Func<IDatabaseEngine>)databaseEngineFactory)();
-					}
-				}
-			}
-			finally
-			{
-				locker.ReleaseWriterLock();
-			}
-		}
-		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
-		{
-		start:
-			await locker.AcquireReaderLock();
-			try{
-				return await databaseEngine.Execute(reads, conditions, writes);
-			}
-			catch{
-				Reconnect(databaseEngine);
-				if(writes.Count == 0){
-					//If we are not writing shit
-					goto start;
-				}
-				throw;
-			}
-			finally{
-				locker.ReleaseReaderLock();
-			}
-		}
-		~ReconnectingDatabaseEngine(){
-			if(Interlocked.Exchange(ref disposed, 1) == 0){
-				DealWithDefunctDatabaseEngine(databaseEngine);
-			}
-		}
-	}
 
 	public sealed class RemoteDatabaseEngine : IDatabaseEngine, IDisposable{
 		[JsonObject(MemberSerialization.Fields)]
@@ -346,13 +248,12 @@ namespace LesbianDB
 			public readonly IReadOnlyDictionary<string, string> conditions;
 			public readonly IReadOnlyDictionary<string, string> writes;
 
-			public Packet(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+			public Packet(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes, string id)
 			{
 				this.reads = reads;
 				this.conditions = conditions;
 				this.writes = writes;
-				Span<byte> bytes = stackalloc byte[32];
-				id = Convert.ToBase64String(bytes, Base64FormattingOptions.None);
+				this.id = id;
 			}
 		}
 		[JsonObject(MemberSerialization.Fields)]
@@ -361,158 +262,172 @@ namespace LesbianDB
 			public string id;
 			public IReadOnlyDictionary<string, string> result;
 		}
-		private readonly ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>> completionSources = new ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>>();
+		private readonly struct PooledMessage{
+			private readonly byte[] bytes;
+			private readonly int len;
 
-		private readonly ClientWebSocket clientWebSocket = new ClientWebSocket();
-		private readonly AsyncMutex asyncMutex = new AsyncMutex();
+			public PooledMessage(byte[] bytes, int len)
+			{
+				this.bytes = bytes;
+				this.len = len;
+			}
+			public ReadOnlyMemory<byte> ReadOnlyMemory => bytes.AsMemory(0, len);
+			public void Return(){
+				Misc.arrayPool.Return(bytes);
+			}
+		}
+		private readonly ConcurrentQueue<PooledMessage> sendQueue = new ConcurrentQueue<PooledMessage>();
+		private readonly AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
 		private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
-		public static async Task<RemoteDatabaseEngine> Connect(Uri server, CancellationToken cancellationToken = default)
-		{
-			RemoteDatabaseEngine remoteDatabaseEngine = new RemoteDatabaseEngine();
-			await remoteDatabaseEngine.clientWebSocket.ConnectAsync(server, cancellationToken);
-			remoteDatabaseEngine.ReceiveEventLoop();
-			return remoteDatabaseEngine;
+		private readonly ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>> completionSources = new ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>>();
+		public RemoteDatabaseEngine(Uri uri){
+			EventLoop(uri, cancellationTokenSource, sendQueue, asyncManagedSemaphore, completionSources);
 		}
-		private async void StartTimeout(string id, CancellationTokenSource cancellationTokenSource, CancellationToken cancellationToken)
-		{
-			try{
-				await Task.Delay(5000, cancellationToken);
-			} catch(OperationCanceledException e){
-				cancellationTokenSource.Cancel();
-				if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource1))
-				{
-					taskCompletionSource1.SetException(e);
-				}
-				return;
-			}
-			cancellationTokenSource.Cancel();
-			if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
-			{
-				taskCompletionSource.SetException(new TimeoutException("The database transaction took too long!"));
-			}
-		}
-		private async void SendImpl(string json, string id, CancellationToken cancellationToken)
-		{
-			byte[] bytes = null;
-			try
-			{
-				int len = Encoding.UTF8.GetByteCount(json);
-				bytes = Misc.arrayPool.Rent(len);
-				Encoding.UTF8.GetBytes(json, 0, json.Length, bytes, 0);
 
-				await asyncMutex.Enter();
+		private static async void EventLoop(Uri uri, CancellationTokenSource cancellationTokenSource, ConcurrentQueue<PooledMessage> sendQueue, AsyncManagedSemaphore semaphore, ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>> completionSources)
+		{
+			Task[] tasks = new Task[2];
+			CancellationToken cancellationToken = cancellationTokenSource.Token;
+		start:
+			bool closefirst = false;
+			using(ClientWebSocket webSocket = new ClientWebSocket()){
 				try
 				{
-					await clientWebSocket.SendAsync(bytes.AsMemory(0, len), WebSocketMessageType.Text, true, cancellationToken);
+					webSocket.Options.AddSubProtocol("LesbianDB-v2.1");
+					await webSocket.ConnectAsync(uri, cancellationToken);
+					closefirst = true;
+					tasks[0] = SendEventLoop(webSocket, semaphore, sendQueue, cancellationToken);
+					tasks[1] = ReceiveEventLoop(webSocket, completionSources, cancellationToken);
+					await await Task.WhenAny(tasks);
 				}
-				finally
+				catch (Exception e)
 				{
-					asyncMutex.Exit();
-				}
-			}
-			catch (Exception e)
-			{
-				if (completionSources.TryRemove(id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
-				{
-					taskCompletionSource.SetException(e);
-				}
-			}
-			finally
-			{
-				if (bytes is { })
-				{
-					Misc.arrayPool.Return(bytes, false);
-				}
-			}
-		}
-		public Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
-		{
-			Packet packet = new Packet(reads, conditions, writes);
-			string json = JsonConvert.SerializeObject(packet);
-			
-			TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource = new TaskCompletionSource<IReadOnlyDictionary<string, string>>();
-			completionSources.TryAdd(packet.id, taskCompletionSource);
-
-			//One of these might complete first
-			CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
-			StartTimeout(packet.id, cancellationTokenSource, this.cancellationTokenSource.Token);
-			SendImpl(json, packet.id, cancellationTokenSource.Token);
-			return taskCompletionSource.Task;
-			
-		}
-		private async void ReceiveEventLoop(){
-			try{
-				Reply reply = new Reply();
-				byte[] buffer = new byte[65536];
-				JsonSerializer jsonSerializer = new JsonSerializer();
-				jsonSerializer.MissingMemberHandling = MissingMemberHandling.Error;
-				CancellationToken cancellationToken = cancellationTokenSource.Token;
-				while(true){
-					using(PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool)){
-					read:
-						WebSocketReceiveResult recv = await clientWebSocket.ReceiveAsync(buffer, cancellationToken);
-						if (recv.MessageType.HasFlag(WebSocketMessageType.Close))
-						{
-							return;
-						}
-						int len = recv.Count;
-						await memoryStream.WriteAsync(buffer, 0, len);
-						if (!recv.EndOfMessage)
-						{
-							goto read;
-						}
-						memoryStream.Seek(0, SeekOrigin.Begin);
-						using(StreamReader streamReader = new StreamReader(memoryStream, Encoding.UTF8, false, -1, true)){
-							jsonSerializer.Populate(streamReader, reply);
-						}
-					}
-					if(completionSources.TryRemove(reply.id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource)){
-						taskCompletionSource.SetResult(reply.result);
-					}
-				}
-			} catch {
-				
-			}
-			finally
-			{
-				await asyncMutex.Enter();
-				try{
-					await clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Jessie Lesbian is cute!", default);
-					clientWebSocket.Dispose();
-					if (Interlocked.Exchange(ref disposed, 1) == 0)
+					if (e is TaskCanceledException)
 					{
-						GC.SuppressFinalize(this);
-						cancellationTokenSource.Cancel();
+						return;
 					}
-					cancellationTokenSource.Dispose();
+					foreach (KeyValuePair<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>> keyValuePair in completionSources.ToArray())
+					{
+						if(completionSources.TryRemove(keyValuePair.Key, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource)){
+							taskCompletionSource.SetException(e);
+						}
+					}
+					goto start;
 				} finally{
-					asyncMutex.Exit();
+					//Try to be nice to server
+					if(closefirst){
+						try{
+							await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Lesbians are very ASMR!", default);
+						} catch{
+							
+						}
+					}
 				}
 			}
 		}
-		private volatile int disposed;
-		public void Dispose()
+
+		private static async Task SendEventLoop(WebSocket webSocket, AsyncManagedSemaphore semaphore, ConcurrentQueue<PooledMessage> sendQueue, CancellationToken cancellationToken){
+			while(true){
+				await semaphore.Enter();
+				if(sendQueue.TryDequeue(out PooledMessage pooledMessage)){
+					try{
+						await webSocket.SendAsync(pooledMessage.ReadOnlyMemory, WebSocketMessageType.Text, true, cancellationToken);
+					} finally{
+						pooledMessage.Return();
+					}
+				} else{
+					return;
+				}
+			}
+		}
+		private static async Task ReceiveEventLoop(WebSocket webSocket, ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyDictionary<string, string>>> completionSources, CancellationToken cancellationToken)
 		{
+			byte[] buffer = null;
+			try{
+				buffer = Misc.arrayPool.Rent(65536);
+				while (true)
+				{
+					using PooledMemoryStream pooledMemoryStream = new PooledMemoryStream(Misc.arrayPool);
+					ReadOnlyMemory<byte> readOnlyMemory;
+					while (true)
+					{
+						WebSocketReceiveResult webSocketReceiveResult = await webSocket.ReceiveAsync(buffer, cancellationToken);
+						bool ended = webSocketReceiveResult.EndOfMessage;
+						if (ended)
+						{
+							if (pooledMemoryStream.Position == 0)
+							{
+								readOnlyMemory = buffer.AsMemory(0, webSocketReceiveResult.Count);
+								break;
+							}
+						}
+						pooledMemoryStream.Write(buffer.AsSpan(0, webSocketReceiveResult.Count));
+						if (ended)
+						{
+							readOnlyMemory = pooledMemoryStream.GetBuffer().AsMemory(0, (int)pooledMemoryStream.Position);
+							break;
+						}
+					}
+					ThreadPool.QueueUserWorkItem((string str) =>
+					{
+						Reply reply = JsonConvert.DeserializeObject<Reply>(str);
+						if (completionSources.TryGetValue(reply.id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
+						{
+							taskCompletionSource.SetResult(reply.result);
+						}
+					}, Encoding.UTF8.GetString(readOnlyMemory.Span), true);
+				}
+			} finally{
+				if(buffer is { }){
+					Misc.arrayPool.Return(buffer, false);
+				}
+			}
+		}
+		private volatile int disposed = 0;
+		public void Dispose(){
 			if(Interlocked.Exchange(ref disposed, 1) == 0){
 				GC.SuppressFinalize(this);
+				asyncManagedSemaphore.Exit();
 				cancellationTokenSource.Cancel();
 			}
 		}
 
-		private RemoteDatabaseEngine(){
-			GC.SuppressFinalize(clientWebSocket);
-			GC.SuppressFinalize(cancellationTokenSource);
-			clientWebSocket.Options.AddSubProtocol("LesbianDB-v2.1");
+		public Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+		{
+			string id;
+			{
+				Span<byte> idbytes = stackalloc byte[32];
+				RandomNumberGenerator.Fill(idbytes);
+				id = Convert.ToBase64String(idbytes, Base64FormattingOptions.None);
+			}
+			string str = JsonConvert.SerializeObject(new Packet(reads, conditions, writes, id));
+			int len = Encoding.UTF8.GetByteCount(str);
+			byte[] bytes = Misc.arrayPool.Rent(len);
+			try{
+				Encoding.UTF8.GetBytes(str, 0, str.Length, bytes, 0);
+			} catch{
+				Misc.arrayPool.Return(bytes, false);
+				throw;
+			}
+			TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource = new TaskCompletionSource<IReadOnlyDictionary<string, string>>();
+			try{
+				completionSources.TryAdd(id, taskCompletionSource);
+				sendQueue.Enqueue(new PooledMessage(bytes, len));
+				asyncManagedSemaphore.Exit();
+			} catch(Exception e){
+				completionSources.TryRemove(id, out _);
+				throw;
+			}
+			return taskCompletionSource.Task;
 		}
-
 
 		~RemoteDatabaseEngine(){
 			if (Interlocked.Exchange(ref disposed, 1) == 0)
 			{
+				asyncManagedSemaphore.Exit();
 				cancellationTokenSource.Cancel();
 			}
 		}
-		
-		
+
 	}
 }

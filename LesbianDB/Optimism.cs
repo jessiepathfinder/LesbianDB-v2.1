@@ -69,7 +69,6 @@ namespace LesbianDB.Optimism.Core
 			private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions;
 			private readonly IDatabaseEngine databaseEngine;
 			public readonly ConcurrentDictionary<string, string> L1ReadCache = new ConcurrentDictionary<string, string>();
-			private static readonly string[] emptyStringArray = new string[0];
 			public readonly ConcurrentDictionary<string, string> L1WriteCache = new ConcurrentDictionary<string, string>();
 
 			public OptimisticExecutionScope(ConcurrentDictionary<string, string>[] optimisticCachePartitions, IDatabaseEngine databaseEngine)

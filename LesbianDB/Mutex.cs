@@ -14,7 +14,12 @@ namespace LesbianDB
 	public sealed class AsyncMutex {
 		private sealed class LockQueueNode{
 			public LockQueueNode prev;
-			public Action<bool> release;
+			public readonly Action<bool> release;
+
+			public LockQueueNode(Action<bool> release)
+			{
+				this.release = release;
+			}
 		}
 		private static readonly LockQueueNode[] starting = new LockQueueNode[1];
 		private volatile LockQueueNode[] lockQueueHead;
@@ -35,13 +40,12 @@ namespace LesbianDB
 				}
 			} else{
 				if(newLockQueueNode is null){
-					newLockQueueNode = new LockQueueNode();
+					newLockQueueNode = new LockQueueNode(taskCompletionSource.SetResult);
 					newLockQueueHead = new LockQueueNode[1];
 					newLockQueueHead[0] = newLockQueueNode;
 					taskCompletionSource = new TaskCompletionSource<bool>();
 				}
 				newLockQueueNode.prev = old[0];
-				newLockQueueNode.release = taskCompletionSource.SetResult;
 				if(ReferenceEquals(Interlocked.CompareExchange(ref lockQueueHead, newLockQueueHead, old), old)){
 					return taskCompletionSource.Task;
 				}

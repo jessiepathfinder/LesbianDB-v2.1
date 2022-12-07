@@ -92,7 +92,7 @@ namespace LesbianDB.Tests
 			if(url is null){
 				Assert.Inconclusive();
 			}
-			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(await RemoteDatabaseEngine.Connect(new Uri(url), default), 0);
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new RemoteDatabaseEngine(new Uri(url)), 0);
 			for (int i = 0; i < 4096;)
 			{
 				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));

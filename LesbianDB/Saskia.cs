@@ -56,8 +56,7 @@ namespace LesbianDB
 		{
 			await locker.AcquireReaderLock();
 			try{
-				Stream stream;
-				if(!readStreams.TryTake(out stream)){
+				if(!readStreams.TryTake(out Stream stream)){
 					stream = new FileStream(filename, FileMode.Open, FileAccess.Read, fileShare, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
 					GC.KeepAlive(writeStream);
 				}
