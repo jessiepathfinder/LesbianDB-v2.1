@@ -52,7 +52,9 @@ In our examples, we will start an ephemeral database server with `LesbianDB.Serv
 
 ### Optimistic functions library
 You may notice that the example above contains many optimization opportunilities and is a bit too complicated. To make life easier, we invented the optimistic functions library.
+
 ![image](https://user-images.githubusercontent.com/55774978/207564794-ad69902a-4b0e-4ec2-9e97-4c9dbed2ffba.png)
+
 Here's an optimistic functions re-implementation of the first example. The optimistic functions library not only makes our life easier, but also performs many optimizations.
 
 ### Database persistence
