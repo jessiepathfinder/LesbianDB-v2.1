@@ -395,7 +395,7 @@ namespace LesbianDB
 			}
 		}
 	}
-	public sealed class RandomReplacementWriteThroughCache : IAsyncDictionary{
+	public sealed class RandomReplacementWriteThroughCache : IFlushableAsyncDictionary{
 		private readonly ConcurrentDictionary<string, string>[] cache = new ConcurrentDictionary<string, string>[256];
 		private readonly IAsyncDictionary underlying;
 
@@ -446,6 +446,15 @@ namespace LesbianDB
 			Task task = underlying.Write(key, value);
 			Hash(key)[key] = value;
 			return task;
+		}
+
+		public Task Flush()
+		{
+			if(underlying is IFlushableAsyncDictionary flushable){
+				return flushable.Flush();
+			} else{
+				return Misc.completed;
+			}
 		}
 	}
 }

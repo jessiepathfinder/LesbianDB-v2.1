@@ -244,7 +244,20 @@ namespace LesbianDB.Server
 					}
 					long memory = options.SoftMemoryLimit;
 					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, () => new RandomFlushingCache(factory, memory, true), out load);
-					databaseEngine = binlog is null ? YuriDatabaseEngine.CreateSelfFlushing(flushableAsyncDictionary, options.PurrfectODDFlushingInterval) : YuriDatabaseEngine.CreateSelfFlushing(flushableAsyncDictionary, binlog, options.PurrfectODDFlushingInterval);
+					IFlushableAsyncDictionary cached = new RandomReplacementWriteThroughCache(flushableAsyncDictionary, memory);
+					if(binlog is null){
+						databaseEngine = YuriDatabaseEngine.CreateSelfFlushing(cached, options.PurrfectODDFlushingInterval);
+					} else{
+						Task load2 = load;
+						async Task func()
+						{
+							await load2;
+							await YuriDatabaseEngine.RestoreBinlog(binlog, flushableAsyncDictionary);
+						}
+						load = func();
+						databaseEngine = YuriDatabaseEngine.CreateSelfFlushing(cached, binlog, options.PurrfectODDFlushingInterval);
+					}
+					
 					getDatabaseEngine = null;
 					closeLevelDB = null;
 					asyncDictionary = null;
