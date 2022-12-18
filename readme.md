@@ -44,7 +44,7 @@ Here's the list of valid arguments to pass to `LesbianDB.Server` at the time of 
   
   ```
 
-In our examples, we will start an ephemeral database server with `LesbianDB.Server --listen ws://localhost:12345 --engine saskia --saskia.zram`
+In our examples, we will start an ephemeral database server with `LesbianDB.Server --listen http://localhost:12345 --engine saskia --saskia.zram`
 
 ### Reads, writes, and conditional writes
 
@@ -63,17 +63,17 @@ A database is not very useful if it's ephemeral. Luckily, we have binlog, on-dis
 #### Binlog persistence
 Binlog persistence uses an append-only file that logs all database writes. It can withstand unexpected power interruption and crashes very well, but the database can take forever to load. Binlog persistence is supported by all storage engines.
 
-`LesbianDB.Server --listen ws://localhost:12345 --engine saskia --binlog mylittledatabase.binlog`
+`LesbianDB.Server --listen http://localhost:12345 --engine saskia --binlog mylittledatabase.binlog`
 
 #### On-disk dictionary persistence
 On-disk dictionary persistence offers startup performance advantages at the cost of reduced durability against unexpected power interuption and crashes. It's not supported by the Yuri storage engine.
 
-`LesbianDB.Server --listen ws://localhost:12345 --engine saskia --persist-dir mylittledatabase_persist`
+`LesbianDB.Server --listen http://localhost:12345 --engine saskia --persist-dir mylittledatabase_persist`
 
 #### Hybrid persistence
 Hybrid persistence combines on-disk dictionary persistence with binlog persistence for fast startup and durability.
 
-`LesbianDB.Server --listen ws://localhost:12345 --engine leveldb --persist-dir mylittledatabase_persist --binlog mylittledatabase.binlog`
+`LesbianDB.Server --listen http://localhost:12345 --engine leveldb --persist-dir mylittledatabase_persist --binlog mylittledatabase.binlog`
 
 #### Storage engine conversion
 The binlog is useful if you want to switch storage engines. Hybrid and binlog persistence databases can be converted to a diffrent storage engine by simply loading the binlog with a new storage engine. Storage engine conversion for on-disk dictionary persistence and ephemeral databases are not supported yet.
