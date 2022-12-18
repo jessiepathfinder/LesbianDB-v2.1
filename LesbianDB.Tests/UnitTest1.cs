@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System;
 using System.IO;
 using LesbianDB.Optimism.Core;
+using System.IO.Compression;
+using System.Threading;
 
 namespace LesbianDB.Tests
 {
@@ -23,6 +25,51 @@ namespace LesbianDB.Tests
 			for (int i = 0; i < 4096;)
 			{
 				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+		}
+		[Test]
+		public async Task NVYuriCompressZramSaskiaOptimismCounter(){
+			EnhancedSequentialAccessDictionary dictionary = new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(new YuriMalloc()));
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(new AsyncCompressionZram(NVYuriCompressCore.Compress, NVYuriCompressCore.Decompress)), CompressionLevel.NoCompression)), 0);
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+				if (i % 16 == 0)
+				{
+					await dictionary.Flush();
+				}
+			}
+		}
+		[Test]
+		public async Task NVYuriCompressYuriMallocSaskiaOptimismCounter()
+		{
+			EnhancedSequentialAccessDictionary dictionary = new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(new YuriMalloc()));
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(new AsyncCompressionZram(NVYuriCompressCore.Compress, NVYuriCompressCore.Decompress, new YuriMalloc(), 268435456)), CompressionLevel.NoCompression)), 0);
+			for (int i = 0; i < 1024;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+				await dictionary.Flush();
+			}
+			Interlocked.MemoryBarrier();
+			byte[] bytes = new byte[268435456];
+			Interlocked.MemoryBarrier();
+			for (int i = 1024; i < 2048;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+				await dictionary.Flush();
+			}
+			Interlocked.MemoryBarrier();
+			GC.KeepAlive(bytes);
+			bytes = null;
+			GC.Collect();
+			Interlocked.MemoryBarrier();
+			for (int i = 2048; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+				if (i % 16 == 0)
+				{
+					await dictionary.Flush();
+				}
 			}
 		}
 		[Test]

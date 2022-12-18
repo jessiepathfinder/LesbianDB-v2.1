@@ -45,15 +45,10 @@ namespace LesbianDB
 					int len = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(0, 4));
 					if (buffer.Length < len)
 					{
-						try
-						{
-							
-						}
-						finally
-						{
-							Misc.arrayPool.Return(buffer);
-							buffer = Misc.arrayPool.Rent(len);
-						}
+						byte[] buffer2 = buffer;
+						buffer = null;
+						Misc.arrayPool.Return(buffer2, false);
+						buffer = Misc.arrayPool.Rent(len);
 					}
 					read = await binlog.ReadAsync(buffer, 0, len);
 					if (read != len)
@@ -98,6 +93,32 @@ namespace LesbianDB
 			binlogLock = new AsyncMutex();
 			InitLocks();
 		}
+
+		public static YuriDatabaseEngine CreateSelfFlushing(IFlushableAsyncDictionary asyncDictionary, int flushingInterval){
+			YuriDatabaseEngine yuriDatabaseEngine = new YuriDatabaseEngine(asyncDictionary);
+			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(yuriDatabaseEngine, false), flushingInterval);
+			return yuriDatabaseEngine;
+		}
+		public static YuriDatabaseEngine CreateSelfFlushing(IFlushableAsyncDictionary asyncDictionary, Stream binlog, int flushingInterval)
+		{
+			YuriDatabaseEngine yuriDatabaseEngine = new YuriDatabaseEngine(asyncDictionary, binlog);
+			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(yuriDatabaseEngine, false), flushingInterval);
+			return yuriDatabaseEngine;
+		}
+		private static async void SelfFlushingLoop(WeakReference<YuriDatabaseEngine> weakReference, int flushingInterval){
+		start:
+			await Task.Delay(flushingInterval);
+			if(weakReference.TryGetTarget(out YuriDatabaseEngine yuriDatabaseEngine)){
+				await yuriDatabaseEngine.flushLock.AcquireWriterLock();
+				try{
+					await ((IFlushableAsyncDictionary)yuriDatabaseEngine.asyncDictionary).Flush();
+				} finally{
+					yuriDatabaseEngine.flushLock.ReleaseWriterLock();
+				}
+				goto start;
+			}
+		}
+		private readonly AsyncReaderWriterLock flushLock = new AsyncReaderWriterLock();
 		private readonly AsyncMutex binlogLock;
 		private readonly Stream binlog;
 		private readonly AsyncReaderWriterLock[] asyncReaderWriterLocks = new AsyncReaderWriterLock[65536];
@@ -174,7 +195,9 @@ namespace LesbianDB
 					}
 				}
 				writes = Misc.ScrubNoEffectWrites(writes, pendingReads);
-
+				if(writes.Count == 0){
+					return readResults;
+				}
 				if (binlog is { })
 				{
 					int len;
@@ -197,14 +220,20 @@ namespace LesbianDB
 					await binlogLock.Enter();
 					writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
 				}
-				Queue<Task> writeTasks = new Queue<Task>();
-				foreach (KeyValuePair<string, string> keyValuePair in writes)
-				{
-					writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
-				}
-				foreach (Task tsk in writeTasks)
-				{
-					await tsk;
+				await flushLock.AcquireReaderLock();
+				try{
+					
+					Queue<Task> writeTasks = new Queue<Task>();
+					foreach (KeyValuePair<string, string> keyValuePair in writes)
+					{
+						writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
+					}
+					foreach (Task tsk in writeTasks)
+					{
+						await tsk;
+					}
+				} finally{
+					flushLock.ReleaseReaderLock();
 				}
 			}
 			finally
@@ -318,6 +347,14 @@ namespace LesbianDB
 					if(closefirst){
 						try{
 							await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Lesbians are very ASMR!", default);
+							try
+							{
+								await Task.WhenAll(tasks);
+							}
+							catch
+							{
+
+							}
 						} catch{
 							
 						}

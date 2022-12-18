@@ -9,6 +9,30 @@ namespace LesbianDB.Tests
 {
 	public static class OptimistimExamples
 	{
+		public static async void Example2(){
+			
+			//Connect to database server @ localhost:12345
+			using RemoteDatabaseEngine databaseEngine = new RemoteDatabaseEngine(new Uri("ws://localhost:12345"));
+
+			//Create optimistic execution manager
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(databaseEngine, 16777216);
+
+			//Execute optimistic function
+			await optimisticExecutionManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				optimisticExecutionScope.Write("Lesbians.AreCute", "true");
+				optimisticExecutionScope.Write("jessielesbian.IsLesbian", "true");
+				return false;
+			});
+
+			//Execute optimistic function
+			await optimisticExecutionManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				optimisticExecutionScope.Write("counter", (Convert.ToUInt64(await optimisticExecutionScope.Read("counter")) + 1).ToString());
+				return false;
+			});
+
+		}
+
+
 		private static readonly OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0);
 
 		//Here's an example optimistic function that increments a counter by 1 each time it's called.

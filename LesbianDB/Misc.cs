@@ -80,6 +80,43 @@ namespace LesbianDB
 		{
 			await tsk;
 		}
+		public static uint HashString3(string str)
+		{
+			int len = Encoding.UTF8.GetByteCount(str);
+			if (len > 1008)
+			{
+				byte[] bytes = null;
+				try
+				{
+					bytes = arrayPool.Rent(len);
+					Encoding.UTF8.GetBytes(str, 0, str.Length, bytes, 0);
+					byte[] output;
+					using (MD5 md5 = MD5.Create())
+					{
+						output = md5.ComputeHash(bytes, 0, len);
+					}
+					return BinaryPrimitives.ReadUInt32BigEndian(output.AsSpan(0, 4));
+				}
+				finally
+				{
+					if (bytes is { })
+					{
+						arrayPool.Return(bytes, false);
+					}
+				}
+			}
+			else
+			{
+				Span<byte> bytes = stackalloc byte[len + 16];
+				Encoding.UTF8.GetBytes(str, bytes);
+				Span<byte> output = bytes[len..];
+				using (MD5 md5 = MD5.Create())
+				{
+					md5.TryComputeHash(bytes.Slice(0, len), output, out _);
+				}
+				return BinaryPrimitives.ReadUInt32LittleEndian(output.Slice(0, 4));
+			}
+		}
 		public static int HashString2(string str){
 			int len = Encoding.UTF8.GetByteCount(str);
 			if(len > 1008){
@@ -108,12 +145,23 @@ namespace LesbianDB
 				return BinaryPrimitives.ReadInt32BigEndian(output);
 			}
 		}
+		public static void CheckDamage(Exception e){
+			if(e is { }){
+				throw new ObjectDamagedException(e);
+			}
+		}
 		public static async Task AtomicFileRewrite(string filename, ReadOnlyMemory<byte> newContent)
 		{
 			string tempfile = GetRandomFileName();
 			await using Stream str = new FileStream(tempfile, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.SequentialScan | FileOptions.Asynchronous | FileOptions.DeleteOnClose);
 			await str.WriteAsync(newContent);
 			File.Replace(tempfile, filename, null);
+		}
+	}
+	public sealed class ObjectDamagedException : Exception
+	{
+		public ObjectDamagedException(Exception innerException) : base("The object is damaged by an unexpected exception", innerException)
+		{
 		}
 	}
 }

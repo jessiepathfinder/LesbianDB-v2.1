@@ -19,11 +19,13 @@ namespace LesbianDB
 	}
 	public sealed class SequentialAccessAsyncDictionary : IAsyncDictionary{
 		private readonly ISwapAllocator allocator;
+		private readonly CompressionLevel compressionLevel;
 		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
 
-		public SequentialAccessAsyncDictionary(ISwapAllocator allocator)
+		public SequentialAccessAsyncDictionary(ISwapAllocator allocator, CompressionLevel compressionLevel = CompressionLevel.Optimal)
 		{
 			this.allocator = allocator ?? throw new ArgumentNullException(nameof(allocator));
+			this.compressionLevel = compressionLevel;
 		}
 
 		private Task<Func<Task<PooledReadOnlyMemoryStream>>> current;
@@ -70,7 +72,7 @@ namespace LesbianDB
 			try
 			{
 				using PooledMemoryStream output = new PooledMemoryStream(Misc.arrayPool);
-				using (Stream outputDeflateStream = new DeflateStream(output, CompressionLevel.Optimal, true)){
+				using (Stream outputDeflateStream = new DeflateStream(output, compressionLevel, true)){
 					BsonDataWriter bsonDataWriter = new BsonDataWriter(outputDeflateStream);
 					GC.SuppressFinalize(bsonDataWriter);
 					bsonDataWriter.WriteStartArray();

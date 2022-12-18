@@ -119,15 +119,10 @@ namespace LesbianDB
 					int len = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(0, 4));
 					if (buffer.Length < len)
 					{
-						try
-						{
-
-						}
-						finally
-						{
-							Misc.arrayPool.Return(buffer);
-							buffer = Misc.arrayPool.Rent(len);
-						}
+						byte[] buffer2 = buffer;
+						buffer = null;
+						Misc.arrayPool.Return(buffer2, false);
+						buffer = Misc.arrayPool.Rent(len);
 					}
 					read = await binlog.ReadAsync(buffer, 0, len);
 					if (read != len)

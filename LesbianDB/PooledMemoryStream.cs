@@ -95,6 +95,9 @@ namespace LesbianDB
 
 		public override void SetLength(long value)
 		{
+			if(position > value){
+				Seek(value, SeekOrigin.Begin);
+			}
 			size = (int)value;
 		}
 

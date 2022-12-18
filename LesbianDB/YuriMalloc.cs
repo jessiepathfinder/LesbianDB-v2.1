@@ -228,14 +228,10 @@ namespace LesbianDB
 				if(weakReference.TryGetTarget(out PromotableSwapHandle promotableSwapHandle)){
 					byte[] buffer = null;
 					try{
-						int len;
-						using (PooledReadOnlyMemoryStream bytes = await promotableSwapHandle.func())
-						{
-							len = (int)bytes.Length;
-							buffer = bytes.GetBuffer();
-						}
+						using PooledReadOnlyMemoryStream bytes = await promotableSwapHandle.func();
+						promotableSwapHandle.func = await secondGeneration.Write(bytes.AsMemory());
+						bytes.TryReinstate(Misc.arrayPool); //Reinstatement
 
-						promotableSwapHandle.func = await secondGeneration.Write(buffer.AsMemory(0, len));
 					} finally{
 						if(buffer is { }){
 							Misc.arrayPool.Return(buffer, false);

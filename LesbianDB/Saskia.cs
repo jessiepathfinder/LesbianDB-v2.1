@@ -109,18 +109,31 @@ namespace LesbianDB
 	}
 	public sealed class PooledReadOnlyMemoryStream : MemoryStream{
 		private volatile ArrayPool<byte> pool;
+		private readonly object initialPool;
 		private volatile byte[] bytes;
 		public PooledReadOnlyMemoryStream(ArrayPool<byte> pool, byte[] bytes, int length) : base(bytes, 0, length, false, false){
-			this.pool = pool ?? throw new ArgumentNullException(nameof(pool));
+			initialPool = pool ?? throw new ArgumentNullException(nameof(pool));
+			this.pool = pool;
 			this.bytes = bytes;
 		}
 		/// <summary>
 		/// Detaches the current PooledReadOnlyMemoryStream from the array pool and
-		/// returns the underlying byte buffer. Doesn't work after dispose.
+		/// returns a memory view
 		/// </summary>
-		public override byte[] GetBuffer(){
+		public Memory<byte> AsMemory()
+		{
 			pool = null; //De-annexation
-			return bytes ?? throw new ObjectDisposedException("Stream");
+			return (bytes ?? throw new ObjectDisposedException("Stream")).AsMemory(0, (int) Length);
+		}
+		/// <summary>
+		/// Reinstates us if we have the original memory pool
+		/// </summary>
+		public bool TryReinstate(ArrayPool<byte> pool){
+			if(ReferenceEquals(pool, initialPool)){
+				this.pool = pool;
+				return true;
+			}
+			return false;
 		}
 		protected override void Dispose(bool disposing)
 		{
@@ -135,6 +148,7 @@ namespace LesbianDB
 	{
 		private readonly AsyncReaderWriterLock locker = new AsyncReaderWriterLock();
 		private readonly ConcurrentDictionary<string, string> cache = new ConcurrentDictionary<string, string>();
+		private readonly CompressionLevel compressionLevel;
 		private readonly ISwapHandle swapHandle;
 		private bool flushed;
 
@@ -142,15 +156,18 @@ namespace LesbianDB
 		private byte[] bytes;
 		private int length;
 
-		public EnhancedSequentialAccessDictionary(ISwapHandle swapHandle)
+		public EnhancedSequentialAccessDictionary(ISwapHandle swapHandle, CompressionLevel compressionLevel = CompressionLevel.Optimal)
 		{
 			this.swapHandle = swapHandle ?? throw new ArgumentNullException(nameof(swapHandle));
+			this.compressionLevel = compressionLevel;
 		}
-		public EnhancedSequentialAccessDictionary(ISwapHandle swapHandle, bool preflushed)
+		public EnhancedSequentialAccessDictionary(ISwapHandle swapHandle, bool preflushed, CompressionLevel compressionLevel = CompressionLevel.Optimal)
 		{
 			this.swapHandle = swapHandle ?? throw new ArgumentNullException(nameof(swapHandle));
 			flushed = preflushed;
+			this.compressionLevel = compressionLevel;
 		}
+
 		public EnhancedSequentialAccessDictionary(){
 			
 		}
@@ -163,7 +180,7 @@ namespace LesbianDB
 			await locker.AcquireWriterLock();
 			try{
 				using PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool);
-				using(DeflateStream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true)){
+				using(DeflateStream deflateStream = new DeflateStream(memoryStream, compressionLevel, true)){
 					BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
 					GC.SuppressFinalize(bsonDataWriter);
 					bsonDataWriter.WriteStartArray();

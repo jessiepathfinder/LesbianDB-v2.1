@@ -10,6 +10,7 @@ using System.Text;
 using Newtonsoft.Json;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.IO.Compression;
 
 namespace LesbianDB.Server
 {
@@ -19,13 +20,15 @@ namespace LesbianDB.Server
 		{
 			[Option("listen", Required = true, HelpText = "The HTTP websocket prefix to listen to (e.g https://lesbiandb-eu.scalegrid.com/c160d449395b5fbe70fcd18cef59264b/)")]
 			public string Listen { get; set; }
-			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia)")]
+			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd)")]
 			public string Engine { get; set; }
-			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb, optional for saskia, have no effect for yuri)")]
+			[Option("purrfectodd.flushinginterval", Required = false, HelpText = "Tells PurrfectODD to flush all writes to disk every N microseconds", Default = 30000)]
+			public int PurrfectODDFlushingInterval { get; set; }
+			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd, optional for saskia, have no effect for yuri)")]
 			public string PersistDir { get; set; }
 			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability.")]
 			public string Binlog{ get; set; }
-			[Option("soft-memory-limit", Required = false, HelpText = "The soft limit to memory usage (in bytes)")]
+			[Option("soft-memory-limit", Required = false, HelpText = "The soft limit to memory usage (in bytes)", Default = 268435456)]
 			public long SoftMemoryLimit { get; set; }
 
 			[Option("yurimalloc.buckets", Required = false, HelpText = "The number of YuriMalloc generation 1 buckets to create (only useful for yuri storage engine, or saskia storage engine without --persist-dir set).", Default = 65536)]
@@ -36,18 +39,26 @@ namespace LesbianDB.Server
 			public int YuriMallocGen2PromotionDelay { get; set; }
 			[Option("yuri.buckets", Required = false, HelpText = "The number of buckets to create (only used with Yuri storage engine).", Default = 65536)]
 			public int YuriBuckets { get; set; }
-			[Option("saskia.zram", Required = false, HelpText = "Tells the Saskia storage engine to use zram instead of YuriMalloc for swapping cold data (no effect if persist-dir is specified or yuri/leveldb storage engine is used).", Default = false)]
+			[Option("accelerated-swap-compression", Required = false, HelpText = "How should we use GPU-accelerated swap compression? disable: do not use GPU-accelerated YuriMalloc swap compression, zram: use GPU-accelerated memory compression as a replacement for swapping, zcache: hot data is stored in RAM uncompressed, warm data is stored in RAM compressed, and cold data is swapped to disk compressed. This feature requires NVIDIA CUDA compartiable GPUs.", Default = "disable")]
+			public string NVSwapCompression { get; set; }
+			[Option("saskia.zram", Required = false, HelpText = "Tells the Saskia storage engine to use (in-CPU) memory compression instead of YuriMalloc for swapping cold data (no effect if persist-dir is specified or yuri/leveldb storage engine is used). This still has effect for PurrfectODD since PurrfectODD uses saskia as it's cache.", Default = false)]
 			public bool SaskiaZram { get; set; }
 		}
 		private static readonly ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();
-		private static ISwapAllocator CreateYuriMalloc(Options options)
+		private static ISwapAllocator CreateYuriMalloc(Options options, string comptype)
 		{
+			if(comptype == "zram"){
+				return new AsyncCompressionZram(NVYuriCompressCore.Compress, NVYuriCompressCore.Decompress);
+			}
 			int count = options.YuriMallocBuckets;
 			ISwapAllocator swapAllocator = (count < 2) ? new YuriMalloc() : ((ISwapAllocator)new SimpleShardedSwapAllocator<YuriMalloc>(count));
 			count = options.YuriMallocGen2Buckets;
 			if (count > 0)
 			{
 				return new GenerationalSwapAllocator(swapAllocator, count == 1 ? new YuriMalloc() : ((ISwapAllocator)new SimpleShardedSwapAllocator<YuriMalloc>(count)), options.YuriMallocGen2PromotionDelay);
+			}
+			if(comptype == "zcache"){
+				return NVYuriCompressCore.TrustedCreateWithPool(swapAllocator, options.SoftMemoryLimit);
 			}
 			return swapAllocator;
 		}
@@ -63,6 +74,10 @@ namespace LesbianDB.Server
 				binlog.Seek(height, SeekOrigin.Begin);
 			}
 			await YuriDatabaseEngine.RestoreBinlog(binlog, asyncDictionary);
+		}
+		private static async Task SmartRestoreBinlog2(Task tsk, IAsyncDictionary asyncDictionary, Stream binlog){
+			await tsk;
+			await SmartRestoreBinlog(asyncDictionary, binlog);
 		}
 		private static volatile Action exit;
 		private static void Main(string[] args)
@@ -119,6 +134,10 @@ namespace LesbianDB.Server
 					persistdir += Path.DirectorySeparatorChar;
 				}
 			}
+			string comptype = options.NVSwapCompression.ToLower();
+			if(comptype != "zram" && comptype != "zcache"){
+				comptype = null;
+			}
 			string lockfile;
 			switch (engine){
 				case "yuri":
@@ -126,9 +145,9 @@ namespace LesbianDB.Server
 					lockfile = null;
 					getDatabaseEngine = null;
 					closeLevelDB = null;
-					yuriMalloc = CreateYuriMalloc(options);
+					yuriMalloc = CreateYuriMalloc(options,comptype);
 					int yuriBuckets = options.YuriBuckets;
-					asyncDictionary = yuriBuckets < 2 ? new SequentialAccessAsyncDictionary(yuriMalloc) : ((IAsyncDictionary)new ShardedAsyncDictionary(() => new SequentialAccessAsyncDictionary(yuriMalloc), yuriBuckets));
+					asyncDictionary = yuriBuckets < 2 ? new SequentialAccessAsyncDictionary(yuriMalloc, comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression) : ((IAsyncDictionary)new ShardedAsyncDictionary(() => new SequentialAccessAsyncDictionary(yuriMalloc), yuriBuckets));
 					if(binlog is null){
 						load = null;
 						databaseEngine = new YuriDatabaseEngine(asyncDictionary);
@@ -146,8 +165,8 @@ namespace LesbianDB.Server
 						if(options.SaskiaZram){
 							asyncDictionary = new RandomFlushingCache(CreateCompressedAsyncDictionary, options.SoftMemoryLimit, true);
 						} else{
-							yuriMalloc = CreateYuriMalloc(options);
-							asyncDictionary = new RandomFlushingCache(() => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(yuriMalloc)), options.SoftMemoryLimit, true);
+							yuriMalloc = CreateYuriMalloc(options, comptype);
+							asyncDictionary = new RandomFlushingCache(() => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(yuriMalloc), comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression), options.SoftMemoryLimit, true);
 						}
 						if (binlog is null)
 						{
@@ -208,7 +227,30 @@ namespace LesbianDB.Server
 						databaseEngine = null;
 					}
 					break;
-
+				case "purrfectodd":
+					if (persistdir is null)
+					{
+						throw new Exception("--persist-dir is mandatory for PurrfectODD storage engine!");
+					}
+					
+					bool saskiazram = options.SaskiaZram;
+					Func<IFlushableAsyncDictionary> factory = null;
+					if(options.SaskiaZram){
+						factory = CreateCompressedAsyncDictionary;
+					} else{
+						ISwapAllocator mallocator = CreateYuriMalloc(options, comptype);
+						CompressionLevel compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
+						factory = () => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(mallocator), compressionLevel);
+					}
+					long memory = options.SoftMemoryLimit;
+					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, () => new RandomFlushingCache(factory, memory, true), out load);
+					databaseEngine = binlog is null ? YuriDatabaseEngine.CreateSelfFlushing(flushableAsyncDictionary, options.PurrfectODDFlushingInterval) : YuriDatabaseEngine.CreateSelfFlushing(flushableAsyncDictionary, binlog, options.PurrfectODDFlushingInterval);
+					getDatabaseEngine = null;
+					closeLevelDB = null;
+					asyncDictionary = null;
+					lockfile = null;
+					finalFlush = null;
+					break;
 				default:
 					throw new Exception("Unknown storage engine: " + engine);
 			}
@@ -227,7 +269,7 @@ namespace LesbianDB.Server
 			exit = () => {
 				try
 				{
-
+					
 				}
 				finally
 				{
@@ -286,6 +328,9 @@ namespace LesbianDB.Server
 			coreloop.Wait();
 			inhibitDomainExit.Wait();
 		}
+		private static IFlushableAsyncDictionary CreateSaskia2(ISwapHandle swapHandle){
+			return new EnhancedSequentialAccessDictionary(swapHandle, true);
+		}
 		private static async Task Main3(HttpListener httpListener, Task load, Task<LevelDBEngine> getLevelDBEngine, IDatabaseEngine databaseEngine, AsyncReaderWriterLock exitLock, Task<HttpListenerContext> abort2)
 		{
 			Action disposeLevelDB = null;
@@ -296,10 +341,9 @@ namespace LesbianDB.Server
 					LevelDBEngine levelDBEngine = await getLevelDBEngine;
 					disposeLevelDB = levelDBEngine.Dispose;
 					databaseEngine = levelDBEngine;
-				}
-				if (load is { })
+				} else if (load is { })
 				{
-					Console.WriteLine("Loading binlog...");
+					Console.WriteLine("Waiting for database to load...");
 					await load;
 				}
 				Console.WriteLine("Done!");
