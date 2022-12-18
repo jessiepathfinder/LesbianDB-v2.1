@@ -43,6 +43,8 @@ namespace LesbianDB.Server
 			public string NVSwapCompression { get; set; }
 			[Option("saskia.zram", Required = false, HelpText = "Tells the Saskia storage engine to use (in-CPU) memory compression instead of YuriMalloc for swapping cold data (no effect if persist-dir is specified or yuri/leveldb storage engine is used). This still has effect for PurrfectODD since PurrfectODD uses saskia as it's cache.", Default = false)]
 			public bool SaskiaZram { get; set; }
+			[Option("saskia.ephemeralbucketscount", Required = false, HelpText = "How many buckets should Saskia use in ephemeral mode (PurrfectODD L2 cache or without --persist-dir)", Default = 65536)]
+			public int EphemeralSaskiaBucketsCount { get; set; }
 		}
 		private static readonly ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();
 		private static ISwapAllocator CreateYuriMalloc(Options options, string comptype)
@@ -163,10 +165,10 @@ namespace LesbianDB.Server
 					if (persistdir is null){
 						lockfile = null;
 						if(options.SaskiaZram){
-							asyncDictionary = new RandomFlushingCache(CreateCompressedAsyncDictionary, options.SoftMemoryLimit, true);
+							asyncDictionary = new ShardedAsyncDictionary(CreateCompressedAsyncDictionary, options.EphemeralSaskiaBucketsCount, options.SoftMemoryLimit);
 						} else{
 							yuriMalloc = CreateYuriMalloc(options, comptype);
-							asyncDictionary = new RandomFlushingCache(() => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(yuriMalloc), comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression), options.SoftMemoryLimit, true);
+							asyncDictionary = new ShardedAsyncDictionary(() => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(yuriMalloc), comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression), options.EphemeralSaskiaBucketsCount, options.SoftMemoryLimit);
 						}
 						if (binlog is null)
 						{
@@ -243,7 +245,7 @@ namespace LesbianDB.Server
 						factory = () => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(mallocator), compressionLevel);
 					}
 					long memory = options.SoftMemoryLimit;
-					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, () => new RandomFlushingCache(factory, memory, true), out load);
+					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, () => new ShardedAsyncDictionary(factory, options.EphemeralSaskiaBucketsCount, memory), out load);
 					IFlushableAsyncDictionary cached = new RandomReplacementWriteThroughCache(flushableAsyncDictionary, memory);
 					if(binlog is null){
 						databaseEngine = YuriDatabaseEngine.CreateSelfFlushing(cached, options.PurrfectODDFlushingInterval);
@@ -257,10 +259,9 @@ namespace LesbianDB.Server
 						load = func();
 						databaseEngine = YuriDatabaseEngine.CreateSelfFlushing(cached, binlog, options.PurrfectODDFlushingInterval);
 					}
-					
+					asyncDictionary = cached;
 					getDatabaseEngine = null;
 					closeLevelDB = null;
-					asyncDictionary = null;
 					lockfile = null;
 					finalFlush = null;
 					break;
@@ -330,6 +331,15 @@ namespace LesbianDB.Server
 						finalFlush.DisposeAsync().AsTask().Wait();
 						Console.WriteLine("Releasing Saskia on-disk dictionary lock...");
 						File.Delete(lockfile);
+					} else if(engine == "purrfectodd"){
+						if(asyncDictionary is { }){
+							if (binlogHeight > 0)
+							{
+								Console.WriteLine("Writing fast-recovery checkpoint...");
+								asyncDictionary.Write("LesbianDB_reserved_binlog_height", binlogHeight.ToString()).Wait();
+							}
+							((IFlushableAsyncDictionary)asyncDictionary).Flush().Wait();
+						}
 					}
 					inhibitDomainExit.Set();
 

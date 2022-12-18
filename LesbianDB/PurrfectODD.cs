@@ -7,14 +7,70 @@ using System.Runtime.InteropServices;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Collections.Concurrent;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Bson;
+using System.IO.Compression;
 
 namespace LesbianDB
 {
 	public sealed class PurrfectODD : IFlushableAsyncDictionary{
+		/// <summary>
+		/// A minimal subset of YuriDatabaseEngine
+		/// designed specifically for us
+		/// </summary>
+		public sealed class ModdedYuriDatabaseEngine
+		{
+			public readonly IAsyncDictionary asyncDictionary;
+			public ModdedYuriDatabaseEngine(IAsyncDictionary asyncDictionary, Stream binlog)
+			{
+				this.asyncDictionary = asyncDictionary ?? throw new ArgumentNullException(nameof(asyncDictionary));
+				this.binlog = binlog ?? throw new ArgumentNullException(nameof(binlog));
+			}
+
+			private readonly Stream binlog;
+			private async Task WriteAndFlushBinlog(byte[] buffer, int len)
+			{
+				await binlog.WriteAsync(buffer, 0, len);
+				await binlog.FlushAsync();
+			}
+			public async Task Execute(IReadOnlyDictionary<string, string> writes)
+			{
+				if(writes.Count == 0){
+					return;
+				}
+				int len;
+				JsonSerializer jsonSerializer = new JsonSerializer();
+				byte[] buffer;
+				using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
+				{
+					memoryStream.SetLength(4);
+					memoryStream.Seek(4, SeekOrigin.Begin);
+					using (Stream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true))
+					{
+						BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
+						jsonSerializer.Serialize(bsonDataWriter, writes);
+					}
+					len = (int)memoryStream.Position;
+					buffer = memoryStream.GetBuffer();
+				}
+				BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
+				Task writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
+				Queue<Task> writeTasks = new Queue<Task>();
+				foreach (KeyValuePair<string, string> keyValuePair in writes)
+				{
+					writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
+				}
+				foreach (Task tsk in writeTasks)
+				{
+					await tsk;
+				}
+				await writeBinlog;
+			}
+		}
 		private readonly Stream[] binlogs = new Stream[65536];
 		private readonly ConcurrentDictionary<string, string> deferredWriteCache = new ConcurrentDictionary<string, string>();
 		private readonly Func<IAsyncDictionary> factory;
-		private readonly YuriDatabaseEngine[] yuriDatabaseEngines = new YuriDatabaseEngine[65536];
+		private readonly ModdedYuriDatabaseEngine[] yuriDatabaseEngines = new ModdedYuriDatabaseEngine[65536];
 
 		private readonly Stream lockfile;
 		private readonly string mapfile;
@@ -71,10 +127,10 @@ namespace LesbianDB
 				}
 			}
 		}
-		private async Task<YuriDatabaseEngine> GetYuriDatabaseEngine(ushort id){
+		private async Task<ModdedYuriDatabaseEngine> GetYuriDatabaseEngine(ushort id){
 			await locker2.AcquireReaderLock();
 			try{
-				YuriDatabaseEngine yuriDatabaseEngine = yuriDatabaseEngines[id];
+				ModdedYuriDatabaseEngine yuriDatabaseEngine = yuriDatabaseEngines[id];
 				if(yuriDatabaseEngine is { }){
 					return yuriDatabaseEngine;
 				}
@@ -84,13 +140,13 @@ namespace LesbianDB
 			await locker2.AcquireWriterLock();
 			try
 			{
-				YuriDatabaseEngine yuriDatabaseEngine = yuriDatabaseEngines[id];
+				ModdedYuriDatabaseEngine yuriDatabaseEngine = yuriDatabaseEngines[id];
 				if (yuriDatabaseEngine is null)
 				{
 					IAsyncDictionary asyncDictionary = factory();
 					Stream binlog = binlogs[id];
 					await YuriDatabaseEngine.RestoreBinlog(binlog, asyncDictionary);
-					yuriDatabaseEngine = new YuriDatabaseEngine(asyncDictionary, binlog);
+					yuriDatabaseEngine = new ModdedYuriDatabaseEngine(asyncDictionary, binlog);
 					yuriDatabaseEngines[id] = yuriDatabaseEngine;
 				}
 				return yuriDatabaseEngine;
@@ -111,7 +167,7 @@ namespace LesbianDB
 				if(deferredWriteCache.TryGetValue(key, out string value)){
 					return value;
 				}
-				return (await (await GetYuriDatabaseEngine(Hash(key))).Execute(new string[] {key}, emptyDictionary, emptyDictionary))[key];
+				return await (await GetYuriDatabaseEngine(Hash(key))).asyncDictionary.Read(key);
 			} finally{
 				locker.ReleaseReaderLock();
 				GC.KeepAlive(lockfile);
@@ -131,9 +187,9 @@ namespace LesbianDB
 		}
 		private readonly struct DictAndGetEngine{
 			public readonly Dictionary<string, string> dictionary;
-			public readonly Task<YuriDatabaseEngine> getDatabaseEngine;
+			public readonly Task<ModdedYuriDatabaseEngine> getDatabaseEngine;
 
-			public DictAndGetEngine(Task<YuriDatabaseEngine> getDatabaseEngine)
+			public DictAndGetEngine(Task<ModdedYuriDatabaseEngine> getDatabaseEngine)
 			{
 				this.getDatabaseEngine = getDatabaseEngine;
 				dictionary = new Dictionary<string, string>();
@@ -166,7 +222,7 @@ namespace LesbianDB
 				Queue<ushort> dirty = new Queue<ushort>();
 				foreach(KeyValuePair<ushort, DictAndGetEngine> keyValuePair1 in dictionaries){
 					DictAndGetEngine dictAndGetEngine = keyValuePair1.Value;
-					flushings.Enqueue((await dictAndGetEngine.getDatabaseEngine).Execute(emptyStringArray, emptyDictionary, dictAndGetEngine.dictionary));
+					flushings.Enqueue((await dictAndGetEngine.getDatabaseEngine).Execute(dictAndGetEngine.dictionary));
 					dirty.Enqueue(keyValuePair1.Key);
 				}
 				while(flushings.TryDequeue(out Task tsk)){
@@ -191,9 +247,5 @@ namespace LesbianDB
 				GC.KeepAlive(lockfile);
 			}
 		}
-
-		private static readonly string[] emptyStringArray = new string[0];
-		private static readonly IReadOnlyDictionary<string, string> emptyDictionary = new Dictionary<string, string>();
-		
 	}
 }

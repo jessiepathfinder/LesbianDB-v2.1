@@ -125,6 +125,20 @@ namespace LesbianDB
 				shards[i++] = factory();
 			}
 		}
+		private static async void Collect(WeakReference<IAsyncDictionary[]> weakReference, long memorylimit, int count)
+		{
+		start:
+			await Task.Delay(1);
+			if(weakReference.TryGetTarget(out IAsyncDictionary[] asyncDictionaries)){
+				if(Misc.thisProcess.VirtualMemorySize64 > memorylimit){
+					await ((IFlushableAsyncDictionary)asyncDictionaries[count == 1 ? 0 : RandomNumberGenerator.GetInt32(0, count)]).Flush();
+				}
+				goto start;
+			}
+		}
+		public ShardedAsyncDictionary(Func<IFlushableAsyncDictionary> factory, int count, long memorylimit) : this(factory, count){
+			Collect(new WeakReference<IAsyncDictionary[]>(shards, false), memorylimit, count);
+		}
 		private IAsyncDictionary GetUnderlying(string key){
 			int hash = ("asmr yuri lesbian neck kissing" + key).GetHashCode() % shards.Length;
 			if(hash < 0){
