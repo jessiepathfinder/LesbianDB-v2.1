@@ -11,6 +11,7 @@ using System.Text;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using Newtonsoft.Json;
+using LesbianDB.Optimism.Core;
 
 namespace LesbianDB
 {
@@ -22,6 +23,11 @@ namespace LesbianDB
 		internal static readonly Process thisProcess = Process.GetCurrentProcess();
 		public static void DieAsap(){
 			Marshal.WriteByte(IntPtr.Zero, 1);
+		}
+		public static T DeserializeObjectWithFastCreate<T>(string json) where T : new(){
+			T obj = new T();
+			JsonConvert.PopulateObject(json, obj);
+			return obj;
 		}
 		public static readonly Task completed = Task.CompletedTask;
 		internal static readonly ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();

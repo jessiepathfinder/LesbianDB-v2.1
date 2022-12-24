@@ -7,16 +7,233 @@ using System.IO;
 using LesbianDB.Optimism.Core;
 using System.IO.Compression;
 using System.Threading;
+using LesbianDB.Optimism.YuriTables;
+using System.Numerics;
 
 namespace LesbianDB.Tests
 {
-	public class Tests
+	public sealed class Tests
 	{
 		[SetUp]
 		public void Setup()
 		{
 			
 		}
+
+
+		//========== LesbianDB.YuriTables ==========
+		[Test]
+		public async Task ForwardYuriTablesArrayQueue(){
+			//The EnhancedSequentialAccessDictionary is never flushed, so it's effectively a pure memory engine
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0);
+			for(int i = 0; i < 4096; ){
+				string str = (i++).ToString();
+				await optimisticExecutionManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+					await optimisticExecutionScope.ArrayPushEnd("queue", str);
+					return false;
+				});
+			}
+			for (BigInteger i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i.ToString(), await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayGetValue("queue", i)));
+				++i;
+			}
+			for (BigInteger i = 0; i < 4096;)
+			{
+				ReadResult readResult = await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopFirst("queue"));
+				Assert.IsTrue(readResult.exists);
+				Assert.AreEqual((i++).ToString(), readResult.value);
+			}
+			Assert.IsFalse((await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopFirst("queue"))).exists);
+			Assert.IsFalse((await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopLast("queue"))).exists);
+		}
+
+		[Test]
+		public async Task BackwardYuriTablesArrayQueue()
+		{
+			//The EnhancedSequentialAccessDictionary is never flushed, so it's effectively a pure memory engine
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0);
+			for (int i = 0; i < 4096;)
+			{
+				string str = (i++).ToString();
+				await optimisticExecutionManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+					await optimisticExecutionScope.ArrayPushStart("queue", str);
+					return false;
+				});
+			}
+			for (BigInteger i = 0; i < 4096;)
+			{
+				BigInteger invert = 4095 - i;
+				Assert.AreEqual(i.ToString(), await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayGetValue("queue", invert)));
+				++i;
+			}
+			for (BigInteger i = 0; i < 4096;)
+			{
+				ReadResult readResult = await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopLast("queue"));
+				Assert.IsTrue(readResult.exists);
+				Assert.AreEqual((i++).ToString(), readResult.value);
+			}
+			Assert.IsFalse((await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopFirst("queue"))).exists);
+			Assert.IsFalse((await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopLast("queue"))).exists);
+		}
+
+		private static IEnumerable<ushort> Random2(){
+			Dictionary<ushort, bool> keyValuePairs = new Dictionary<ushort, bool>();
+			while(keyValuePairs.Count < 4096){
+				ushort val = (ushort)RandomNumberGenerator.GetInt32(0, 4096);
+				if(keyValuePairs.TryAdd(val, false)){
+					yield return val;
+				}
+			}
+		}
+		[Test]
+		public async Task BTreeAddSelect(){
+			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				foreach(BigInteger bigInteger in Random2()){
+					await optimisticExecutionScope.BTreeTryInsert("mytree", bigInteger);
+				}
+				BigInteger reference = BigInteger.Zero;
+				await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect("mytree", CompareOperator.LessThan, false, 100)){
+					Assert.AreEqual(reference++, bigInteger1);
+				}
+				return false;
+			});
+		}
+		[Test] public async Task SortedSet(){
+			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				foreach (BigInteger bigInteger in Random2())
+				{
+					string strbigint = bigInteger.ToString();
+					await optimisticExecutionScope.ZSet("mysortedset", "meow_" + strbigint, strbigint + " LesbianDB now has an ISAM", bigInteger);
+				}
+				await optimisticExecutionScope.ZSet("mysortedset", "meow_50", "asmr yuri lesbian neck kissing", 50);
+				await optimisticExecutionScope.ZSet("mysortedset", "meow_40", "40 LesbianDB now has an ISAM", 30);
+				BigInteger reference = BigInteger.Zero;
+				bool first30 = true;
+				await foreach (SortedSetReadResult sortedSetReadResult in optimisticExecutionScope.ZSelect("mysortedset", CompareOperator.LessThan, 100, false))
+				{
+					if (reference == 40)
+					{
+						reference += 1;
+					}
+					string strbigint = reference.ToString();
+					if (sortedSetReadResult.bigInteger == 50){
+						Assert.AreEqual("asmr yuri lesbian neck kissing", sortedSetReadResult.value);
+					} else{
+						if (sortedSetReadResult.bigInteger == 30)
+						{
+							Assert.True(sortedSetReadResult.key == "meow_" + strbigint || sortedSetReadResult.key == "meow_40");
+							Assert.True(sortedSetReadResult.value == "30 LesbianDB now has an ISAM" || sortedSetReadResult.value == "40 LesbianDB now has an ISAM");
+							if (first30)
+							{
+								first30 = false;
+								Assert.AreEqual(reference, sortedSetReadResult.bigInteger);
+								continue;
+							}
+						}
+						else
+						{
+							Assert.AreEqual("meow_" + strbigint, sortedSetReadResult.key);
+							Assert.AreEqual(strbigint + " LesbianDB now has an ISAM", sortedSetReadResult.value);
+						}
+					}
+					
+					Assert.AreEqual(reference++, sortedSetReadResult.bigInteger);
+				}
+				return false;
+			});
+		}
+
+		[Test]
+		public async Task HashReadWriteDelete(){
+			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				await optimisticExecutionScope.HashSet("jessielesbian", "iscute", "true");
+				await optimisticExecutionScope.HashSet("jessielesbian", "uses.facebook", "false");
+				await optimisticExecutionScope.HashSet("jessielesbian", "uses.bitcoin", "yes");
+				Assert.AreEqual("true", await optimisticExecutionScope.HashGet("jessielesbian", "iscute"));
+				Assert.AreEqual("false", await optimisticExecutionScope.HashGet("jessielesbian", "uses.facebook"));
+				Assert.AreEqual("yes", await optimisticExecutionScope.HashGet("jessielesbian", "uses.bitcoin"));
+
+				await optimisticExecutionScope.HashSet("jessielesbian", "uses.bitcoin", "no");
+				Assert.AreEqual("no", await optimisticExecutionScope.HashGet("jessielesbian", "uses.bitcoin"));
+				await optimisticExecutionScope.HashSet("jessielesbian", "uses.facebook", null);
+				Assert.AreEqual("true", await optimisticExecutionScope.HashGet("jessielesbian", "iscute"));
+				Assert.AreEqual(null, await optimisticExecutionScope.HashGet("jessielesbian", "uses.facebook"));
+				Assert.AreEqual("no", await optimisticExecutionScope.HashGet("jessielesbian", "uses.bitcoin"));
+				await optimisticExecutionScope.HashSet("jessielesbian", "uses.facebook", "false");
+				Assert.AreEqual("true", await optimisticExecutionScope.HashGet("jessielesbian", "iscute"));
+				Assert.AreEqual("false", await optimisticExecutionScope.HashGet("jessielesbian", "uses.facebook"));
+				Assert.AreEqual("no", await optimisticExecutionScope.HashGet("jessielesbian", "uses.bitcoin"));
+				return false;
+			});
+		}
+		[Test]
+		public async Task Table(){
+			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				//insert rows
+				await optimisticExecutionScope.TryCreateTable(new Dictionary<string, ColumnType>
+				{
+					{"name", ColumnType.UniqueString},
+					{"id", ColumnType.UniqueString},
+					{"height", ColumnType.SortedInt},
+					{"description", ColumnType.DataString}
+				}, "lesbians");
+				await optimisticExecutionScope.TableInsert("lesbians", new Dictionary<string, string> {
+					{"name", "jessielesbian" },
+					{"id", "1"},
+					{"description", "the cute, nice, and lesbian creator of LesbianDB v2.1"}
+				}, new Dictionary<string, BigInteger> {
+					{"height", 160}
+				});
+				await optimisticExecutionScope.TableInsert("lesbians", new Dictionary<string, string> {
+					{"name", "vnch-chan" },
+					{"id", "2"},
+					{"description", "busy making vietnam democratic"}
+				}, new Dictionary<string, BigInteger> {
+					{"height", 155}
+				});
+				await optimisticExecutionScope.TableInsert("lesbians", new Dictionary<string, string> {
+					{"name", "hillary-clinton" },
+					{"id", "3"},
+					{"description", "running for president"}
+				}, new Dictionary<string, BigInteger> {
+					{"height", 210}
+				});
+
+				//select tests
+				Assert.IsNull(await optimisticExecutionScope.TableTrySelectPrimaryKey("lesbians", "name", "adolf-hitler"));
+
+				Row testrow = await optimisticExecutionScope.TableTrySelectPrimaryKey("lesbians", "name", "jessielesbian");
+				Assert.NotNull(testrow);
+				Assert.AreEqual("jessielesbian", testrow["name"]);
+				Assert.AreEqual("1", testrow["id"]);
+				Assert.AreEqual("160", testrow["height"]);
+				int count = 0;
+				await foreach(Row row in optimisticExecutionScope.TableTrySelectSortedRow("lesbians", "height", CompareOperator.LessThan, 200, false)){
+					Assert.AreNotEqual("hillary-clinton", row["name"]);
+					++count;
+				}
+				Assert.AreEqual(2, count);
+
+				await optimisticExecutionScope.TableUpdateRow(testrow, "id", "100");
+				testrow = await optimisticExecutionScope.TableTrySelectPrimaryKey("lesbians", "id", "100");
+				Assert.NotNull(testrow);
+				Assert.AreEqual("jessielesbian", testrow["name"]);
+				Assert.AreEqual("100", testrow["id"]);
+				Assert.AreEqual("160", testrow["height"]);
+				await optimisticExecutionScope.TableDeleteRow(testrow);
+				await foreach (Row row in optimisticExecutionScope.TableTrySelectSortedRow("lesbians", "height", CompareOperator.LessThan, 200, false))
+				{
+					++count;
+				}
+				Assert.AreEqual(3, count);
+				return false;
+			});
+		}
+
+
+		//========== LesbianDB ==========
+
 
 		[Test]
 		public async Task YuriMallocOptimismCounter()

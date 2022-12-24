@@ -248,7 +248,7 @@ namespace LesbianDB.Server
 					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, () => new ShardedAsyncDictionary(factory, options.EphemeralSaskiaBucketsCount, memory), out load);
 					IFlushableAsyncDictionary cached = new RandomReplacementWriteThroughCache(flushableAsyncDictionary, memory);
 					if(binlog is null){
-						databaseEngine = YuriDatabaseEngine.CreateSelfFlushing(cached, options.PurrfectODDFlushingInterval);
+						databaseEngine = new YuriDatabaseEngine(cached, options.PurrfectODDFlushingInterval);
 					} else{
 						Task load2 = load;
 						async Task func()
@@ -257,7 +257,7 @@ namespace LesbianDB.Server
 							await YuriDatabaseEngine.RestoreBinlog(binlog, flushableAsyncDictionary);
 						}
 						load = func();
-						databaseEngine = YuriDatabaseEngine.CreateSelfFlushing(cached, binlog, options.PurrfectODDFlushingInterval);
+						databaseEngine = new YuriDatabaseEngine(cached, binlog, true, options.PurrfectODDFlushingInterval);
 					}
 					asyncDictionary = cached;
 					getDatabaseEngine = null;
@@ -333,11 +333,7 @@ namespace LesbianDB.Server
 						File.Delete(lockfile);
 					} else if(engine == "purrfectodd"){
 						if(asyncDictionary is { }){
-							if (binlogHeight > 0)
-							{
-								Console.WriteLine("Writing fast-recovery checkpoint...");
-								asyncDictionary.Write("LesbianDB_reserved_binlog_height", binlogHeight.ToString()).Wait();
-							}
+							Console.WriteLine("Flushing PurrfectODD on-disk dictionary...");
 							((IFlushableAsyncDictionary)asyncDictionary).Flush().Wait();
 						}
 					}

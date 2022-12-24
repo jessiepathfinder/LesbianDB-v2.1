@@ -18,6 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\LesbianDB.YuriTables\LesbianDB.YuriTables.csproj" />
     <ProjectReference Include="..\LesbianDB\LesbianDB.csproj" />
   </ItemGroup>
 

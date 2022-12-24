@@ -82,6 +82,7 @@ namespace LesbianDB
 			}
 		}
 		private readonly IAsyncDictionary asyncDictionary;
+		private readonly bool writefastrecover;
 		public YuriDatabaseEngine(IAsyncDictionary asyncDictionary){
 			this.asyncDictionary = asyncDictionary ?? throw new ArgumentNullException(nameof(asyncDictionary));
 			InitLocks();
@@ -93,17 +94,25 @@ namespace LesbianDB
 			binlogLock = new AsyncMutex();
 			InitLocks();
 		}
-
-		public static YuriDatabaseEngine CreateSelfFlushing(IFlushableAsyncDictionary asyncDictionary, int flushingInterval){
-			YuriDatabaseEngine yuriDatabaseEngine = new YuriDatabaseEngine(asyncDictionary);
-			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(yuriDatabaseEngine, false), flushingInterval);
-			return yuriDatabaseEngine;
-		}
-		public static YuriDatabaseEngine CreateSelfFlushing(IFlushableAsyncDictionary asyncDictionary, Stream binlog, int flushingInterval)
+		public YuriDatabaseEngine(IAsyncDictionary asyncDictionary, Stream binlog, bool writefastrecover)
 		{
-			YuriDatabaseEngine yuriDatabaseEngine = new YuriDatabaseEngine(asyncDictionary, binlog);
-			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(yuriDatabaseEngine, false), flushingInterval);
-			return yuriDatabaseEngine;
+			this.asyncDictionary = asyncDictionary ?? throw new ArgumentNullException(nameof(asyncDictionary));
+			this.binlog = binlog ?? throw new ArgumentNullException(nameof(binlog));
+			this.writefastrecover = writefastrecover;
+			binlogLock = new AsyncMutex();
+			InitLocks();
+		}
+		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, int flushingInterval) : this(asyncDictionary)
+		{
+			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false), flushingInterval);
+		}
+		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, Stream binlog, int flushingInterval) : this(asyncDictionary, binlog)
+		{
+			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false), flushingInterval);
+		}
+		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, Stream binlog, bool writefastrecover, int flushingInterval) : this(asyncDictionary, binlog, writefastrecover)
+		{
+			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false), flushingInterval);
 		}
 		private static async void SelfFlushingLoop(WeakReference<YuriDatabaseEngine> weakReference, int flushingInterval){
 		start:
@@ -132,11 +141,18 @@ namespace LesbianDB
 			Dictionary<ushort, bool> lockLevels = new Dictionary<ushort, bool>();
 			bool write = writes.Count > 0;
 			if(write){
+				if(writefastrecover){
+					if(writes.ContainsKey("LesbianDB_reserved_binlog_height")){
+						write = false;
+						goto nowrite;
+					}
+				}
 				foreach (KeyValuePair<string, string> keyValuePair in writes)
 				{
-					lockLevels.Add((ushort)(keyValuePair.Key.GetHashCode() & 65535), true);
+					lockLevels.TryAdd((ushort)(keyValuePair.Key.GetHashCode() & 65535), true);
 				}
 			}
+		nowrite:
 			foreach (string str in reads)
 			{
 				lockLevels.TryAdd((ushort)(str.GetHashCode() & 65535), false);
@@ -198,6 +214,8 @@ namespace LesbianDB
 				if(writes.Count == 0){
 					return readResults;
 				}
+				long logheight = 0;
+				Queue<Task> writeTasks = new Queue<Task>();
 				if (binlog is { })
 				{
 					int len;
@@ -218,12 +236,16 @@ namespace LesbianDB
 					BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
 					binlocked = true;
 					await binlogLock.Enter();
+					if(writefastrecover){
+						logheight = binlog.Position;
+					}
 					writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
 				}
 				await flushLock.AcquireReaderLock();
 				try{
-					
-					Queue<Task> writeTasks = new Queue<Task>();
+					if(logheight > 0){
+						writeTasks.Enqueue(asyncDictionary.Write("LesbianDB_reserved_binlog_height", logheight.ToString()));
+					}
 					foreach (KeyValuePair<string, string> keyValuePair in writes)
 					{
 						writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
@@ -407,7 +429,7 @@ namespace LesbianDB
 					}
 					ThreadPool.QueueUserWorkItem((string str) =>
 					{
-						Reply reply = JsonConvert.DeserializeObject<Reply>(str);
+						Reply reply = Misc.DeserializeObjectWithFastCreate<Reply>(str);
 						if (completionSources.TryGetValue(reply.id, out TaskCompletionSource<IReadOnlyDictionary<string, string>> taskCompletionSource))
 						{
 							taskCompletionSource.SetResult(reply.result);
