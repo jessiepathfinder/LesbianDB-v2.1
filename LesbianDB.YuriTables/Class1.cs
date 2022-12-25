@@ -393,10 +393,10 @@ namespace LesbianDB.Optimism.YuriTables
 					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), false, reverse);
 				case CompareOperator.GreaterThanOrEqual:
 					bigInteger -= 1;
-					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), true, reverse);
+					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), false, reverse);
 				case CompareOperator.LessThanOrEqual:
 					bigInteger += 1;
-					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), false, reverse);
+					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), true, reverse);
 				case CompareOperator.EqualTo:
 					return optimisticExecutionScope.BTreeSelectEqual(treename, bigInteger);
 				case CompareOperator.NotEqualTo:
@@ -668,8 +668,8 @@ namespace LesbianDB.Optimism.YuriTables
 		public static async Task TableUpdateRow(this IOptimisticExecutionScope optimisticExecutionScope, Row row, string column, string value)
 		{
 			string id = row.id;
-			string table = row.table;
 			Task<string> readtsk = optimisticExecutionScope.Read(id);
+			string table = row.table;
 			ColumnType columnType = row.GetColumnType(column);
 			if (columnType == ColumnType.SortedInt){
 				throw new InvalidOperationException("Sorted int updates are not supported by this method");
@@ -703,6 +703,36 @@ namespace LesbianDB.Optimism.YuriTables
 			}
 			row[column] = value;
 			optimisticExecutionScope.Write(id, JsonConvert.SerializeObject(row));
+		}
+		public static async Task TableUpdateSortedIntRow(this IOptimisticExecutionScope optimisticExecutionScope, string name, Row row, string column, BigInteger bigInteger){
+			string id = row.id;
+			Task<string> readtsk = optimisticExecutionScope.Read(id);
+			string table = row.table;
+			if(row.GetColumnType(column) != ColumnType.SortedInt){
+				throw new InvalidOperationException(new StringBuilder("Column ").Append(column).Append(" is not sorted int").ToString());
+			}
+			string strbigint = bigInteger.ToString();
+			string btreename = new StringBuilder(table).Append("_btree_").Append(column).ToString();
+			string read = await readtsk;
+			if (read is null)
+			{
+				throw new InvalidOperationException("This row is already deleted");
+			}
+			Dictionary<string, string> keyValuePairs = Misc.DeserializeObjectWithFastCreate<Dictionary<string, string>>(read);
+			foreach (KeyValuePair<string, string> keyValuePair in row)
+			{
+				if (keyValuePairs[keyValuePair.Key] != keyValuePair.Value)
+				{
+					throw new Exception("Row desynchronized from database");
+				}
+			}
+			if(row[column] == strbigint){
+				return;
+			}
+			Task tsk = optimisticExecutionScope.ZSet(btreename, id, string.Empty, bigInteger);
+			row[column] = strbigint;
+			optimisticExecutionScope.Write(id, JsonConvert.SerializeObject(row));
+			await tsk;
 		}
 		public static async Task TableDeleteRow(this IOptimisticExecutionScope optimisticExecutionScope, Row row)
 		{

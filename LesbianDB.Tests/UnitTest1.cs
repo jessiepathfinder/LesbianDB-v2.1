@@ -221,12 +221,21 @@ namespace LesbianDB.Tests
 				Assert.AreEqual("jessielesbian", testrow["name"]);
 				Assert.AreEqual("100", testrow["id"]);
 				Assert.AreEqual("160", testrow["height"]);
-				await optimisticExecutionScope.TableDeleteRow(testrow);
-				await foreach (Row row in optimisticExecutionScope.TableTrySelectSortedRow("lesbians", "height", CompareOperator.LessThan, 200, false))
-				{
+				await optimisticExecutionScope.TableUpdateSortedIntRow("lesbians", testrow, "height", 300);
+				await foreach(Row row in optimisticExecutionScope.TableTrySelectSortedRow("lesbians", "height", CompareOperator.EqualTo, 300, false)){
+					Assert.NotNull(row);
+					Assert.AreEqual("jessielesbian", row["name"]);
+					Assert.AreEqual("100", row["id"]);
+					Assert.AreEqual("300", row["height"]);
 					++count;
 				}
 				Assert.AreEqual(3, count);
+				await optimisticExecutionScope.TableDeleteRow(testrow);
+				await foreach (Row row in optimisticExecutionScope.TableTrySelectSortedRow("lesbians", "height", CompareOperator.GreaterThan, 200, false))
+				{
+					++count;
+				}
+				Assert.AreEqual(4, count);
 				return false;
 			});
 		}
