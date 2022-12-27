@@ -244,7 +244,7 @@ namespace LesbianDB.Server
 						factory = CreateCompressedAsyncDictionary;
 					} else{
 						ISwapAllocator mallocator = CreateYuriMalloc(options, comptype);
-						CompressionLevel compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
+						compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
 						factory = () => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(mallocator), compressionLevel);
 					}
 					long memory = options.SoftMemoryLimit;
