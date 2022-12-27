@@ -116,6 +116,11 @@ namespace LesbianDB
 			this.pool = pool;
 			this.bytes = bytes;
 		}
+		public PooledReadOnlyMemoryStream(byte[] bytes, int length) : base(bytes, 0, length, false, false)
+		{
+			GC.SuppressFinalize(this);
+			this.bytes = bytes;
+		}
 		/// <summary>
 		/// Detaches the current PooledReadOnlyMemoryStream from the array pool and
 		/// returns a memory view
@@ -396,19 +401,19 @@ namespace LesbianDB
 		}
 	}
 	public sealed class RandomReplacementWriteThroughCache : IFlushableAsyncDictionary{
-		private readonly ConcurrentDictionary<string, string>[] cache = new ConcurrentDictionary<string, string>[256];
+		private readonly ConcurrentXHashMap<string>[] cache = new ConcurrentXHashMap<string>[256];
 		private readonly IAsyncDictionary underlying;
 
 		public RandomReplacementWriteThroughCache(IAsyncDictionary underlying, long softMemoryLimit)
 		{
 			for (int i = 0; i < 256;)
 			{
-				cache[i++] = new ConcurrentDictionary<string, string>();
+				cache[i++] = new ConcurrentXHashMap<string>();
 			}
-			EvictionThread(new WeakReference<ConcurrentDictionary<string, string>[]>(cache, false), softMemoryLimit);
+			EvictionThread(new WeakReference<ConcurrentXHashMap<string>[]>(cache, false), softMemoryLimit);
 			this.underlying = underlying ?? throw new ArgumentNullException(nameof(underlying));
 		}
-		private static void RandomEvict(ConcurrentDictionary<string, string>[] cache)
+		private static void RandomEvict(ConcurrentXHashMap<string>[] cache)
 		{
 			Span<byte> bytes = stackalloc byte[1];
 			RandomNumberGenerator.Fill(bytes);
@@ -419,26 +424,26 @@ namespace LesbianDB
 			RandomNumberGenerator.Fill(bytes);
 			return Task.Delay(bytes[0] + 1);
 		}
-		private static async void EvictionThread(WeakReference<ConcurrentDictionary<string, string>[]> weakReference, long softMemoryLimit){
+		private static async void EvictionThread(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit){
 		start:
 			await RandomWait();
-			if(weakReference.TryGetTarget(out ConcurrentDictionary<string, string>[] cache)){
+			if(weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] cache)){
 				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
 					RandomEvict(cache);
 				}
 				goto start;
 			}
 		}
-		private ConcurrentDictionary<string, string> Hash(string key){
+		private ConcurrentXHashMap<string> Hash(string key){
 			return cache[("Cute anime lesbians" + key).GetHashCode() & 255];
 		}
 		public async Task<string> Read(string key)
 		{
-			ConcurrentDictionary<string, string> keyValuePairs = Hash(key);
+			ConcurrentXHashMap<string> keyValuePairs = Hash(key);
 			if(keyValuePairs.TryGetValue(key, out string value)){
 				return value;
 			}
-			return keyValuePairs.GetOrAdd(key, await underlying.Read(key));
+			return keyValuePairs.GetOrAdd(new Hash256(key), await underlying.Read(key));
 		}
 
 		public Task Write(string key, string value)

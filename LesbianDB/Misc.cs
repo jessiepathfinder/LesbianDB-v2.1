@@ -12,6 +12,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using Newtonsoft.Json;
 using LesbianDB.Optimism.Core;
+using System.Numerics;
 
 namespace LesbianDB
 {

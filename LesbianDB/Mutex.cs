@@ -40,10 +40,12 @@ namespace LesbianDB
 				}
 			} else{
 				if(newLockQueueNode is null){
+					if(taskCompletionSource is null){
+						taskCompletionSource = new TaskCompletionSource<bool>();
+					}
 					newLockQueueNode = new LockQueueNode(taskCompletionSource.SetResult);
 					newLockQueueHead = new LockQueueNode[1];
 					newLockQueueHead[0] = newLockQueueNode;
-					taskCompletionSource = new TaskCompletionSource<bool>();
 				}
 				newLockQueueNode.prev = old[0];
 				if(ReferenceEquals(Interlocked.CompareExchange(ref lockQueueHead, newLockQueueHead, old), old)){

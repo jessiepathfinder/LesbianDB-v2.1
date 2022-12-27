@@ -57,7 +57,7 @@ namespace LesbianDB.Server
 			count = options.YuriMallocGen2Buckets;
 			if (count > 0)
 			{
-				return new GenerationalSwapAllocator(swapAllocator, count == 1 ? new YuriMalloc() : ((ISwapAllocator)new SimpleShardedSwapAllocator<YuriMalloc>(count)), options.YuriMallocGen2PromotionDelay);
+				return new GenerationalSwapAllocator(swapAllocator, count == 1 ? new BuddyMalloc(new YuriMalloc()) : ((ISwapAllocator)new SimpleShardedSwapAllocator<YuriMalloc>(count)), options.YuriMallocGen2PromotionDelay);
 			}
 			if(comptype == "zcache"){
 				return NVYuriCompressCore.TrustedCreateWithPool(swapAllocator, options.SoftMemoryLimit);
@@ -141,6 +141,7 @@ namespace LesbianDB.Server
 				comptype = null;
 			}
 			string lockfile;
+			CompressionLevel compressionLevel;
 			switch (engine){
 				case "yuri":
 					finalFlush = null;
@@ -149,7 +150,8 @@ namespace LesbianDB.Server
 					closeLevelDB = null;
 					yuriMalloc = CreateYuriMalloc(options,comptype);
 					int yuriBuckets = options.YuriBuckets;
-					asyncDictionary = yuriBuckets < 2 ? new SequentialAccessAsyncDictionary(yuriMalloc, comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression) : ((IAsyncDictionary)new ShardedAsyncDictionary(() => new SequentialAccessAsyncDictionary(yuriMalloc), yuriBuckets));
+					compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
+					asyncDictionary = new LargeDataOffloader(yuriBuckets < 2 ? new SequentialAccessAsyncDictionary(yuriMalloc, compressionLevel) : ((IAsyncDictionary)new ShardedAsyncDictionary(() => new SequentialAccessAsyncDictionary(yuriMalloc), yuriBuckets)), yuriMalloc, compressionLevel);
 					if(binlog is null){
 						load = null;
 						databaseEngine = new YuriDatabaseEngine(asyncDictionary);
@@ -168,7 +170,8 @@ namespace LesbianDB.Server
 							asyncDictionary = new ShardedAsyncDictionary(CreateCompressedAsyncDictionary, options.EphemeralSaskiaBucketsCount, options.SoftMemoryLimit);
 						} else{
 							yuriMalloc = CreateYuriMalloc(options, comptype);
-							asyncDictionary = new ShardedAsyncDictionary(() => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(yuriMalloc), comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression), options.EphemeralSaskiaBucketsCount, options.SoftMemoryLimit);
+							compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
+							asyncDictionary = new LargeDataOffloader(new ShardedAsyncDictionary(() => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(yuriMalloc), compressionLevel), options.EphemeralSaskiaBucketsCount, options.SoftMemoryLimit), yuriMalloc, compressionLevel);
 						}
 						if (binlog is null)
 						{

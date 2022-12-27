@@ -173,20 +173,142 @@ namespace LesbianDB
 	}
 
 	public sealed class SimpleShardedSwapAllocator<T> : ISwapAllocator where T : ISwapAllocator, new(){
-		private readonly T[] swapAllocators;
+		private readonly BuddyMalloc[] swapAllocators;
 		public SimpleShardedSwapAllocator(int count){
 			if(count < 2){
 				throw new ArgumentOutOfRangeException("Minimum 2 swap allocators per SimpleShardedSwapAllocator");
 			}
-			swapAllocators = new T[count];
+			swapAllocators = new BuddyMalloc[count];
 			for(int i = 0; i < count; ){
-				swapAllocators[i++] = new T();
+				swapAllocators[i++] = new BuddyMalloc(new T());
 			}
 		}
 
 		public Task<Func<Task<PooledReadOnlyMemoryStream>>> Write(ReadOnlyMemory<byte> bytes)
 		{
 			return swapAllocators[RandomNumberGenerator.GetInt32(0, swapAllocators.Length)].Write(bytes);
+		}
+	}
+	public sealed class BuddyMalloc : ISwapAllocator
+	{
+		private readonly ISwapAllocator underlying;
+		private readonly ConcurrentBag<WeakReference<DeferredMalloc>> queue = new ConcurrentBag<WeakReference<DeferredMalloc>>();
+		private readonly AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
+		private static readonly Task<Func<Task<PooledReadOnlyMemoryStream>>> empty = Task.FromResult<Func<Task<PooledReadOnlyMemoryStream>>>(CreateEmpty);
+		private static Task<PooledReadOnlyMemoryStream> CreateEmpty(){
+			return Task.FromResult(new PooledReadOnlyMemoryStream(new byte[0], 0));
+		}
+		public BuddyMalloc(ISwapAllocator swapAllocator)
+		{
+			underlying = swapAllocator ?? throw new ArgumentNullException(nameof(swapAllocator));
+			AllocLoop(swapAllocator, queue, asyncManagedSemaphore);
+		}
+		private sealed class DeferredMalloc
+		{
+			public volatile object backingStore;
+			public int offset;
+			public int count;
+			public async Task<PooledReadOnlyMemoryStream> Read()
+			{
+				object obj = backingStore;
+				if (obj is Func<Task<PooledReadOnlyMemoryStream>> func)
+				{
+					Task<PooledReadOnlyMemoryStream> tsk = func();
+					byte[] bytes = Misc.arrayPool.Rent(count);
+					try
+					{
+						using (Stream str = await tsk)
+						{
+							str.Seek(offset, SeekOrigin.Begin);
+							str.Read(bytes, 0, count);
+						}
+						return new PooledReadOnlyMemoryStream(Misc.arrayPool, bytes, count);
+					}
+					catch
+					{
+						Misc.arrayPool.Return(bytes);
+						throw;
+					}
+				}
+				else
+				{
+					return new PooledReadOnlyMemoryStream((byte[])obj, count);
+				}
+			}
+		}
+		private static async void AllocLoop(ISwapAllocator swapAllocator, ConcurrentBag<WeakReference<DeferredMalloc>> queue, AsyncManagedSemaphore asyncManagedSemaphore)
+		{
+			PooledMemoryStream pooledMemoryStream = new PooledMemoryStream(Misc.arrayPool, 4096);
+			Queue<DeferredMalloc> deferredMallocs = new Queue<DeferredMalloc>();
+			while (true)
+			{
+
+				while (pooledMemoryStream.Position < 4096)
+				{
+					await asyncManagedSemaphore.Enter();
+					WeakReference<DeferredMalloc> weakReference;
+					bool take;
+					try
+					{
+						take = queue.TryTake(out weakReference);
+					}
+					catch (ObjectDisposedException)
+					{
+						return;
+					}
+					if (take)
+					{
+						if (weakReference.TryGetTarget(out DeferredMalloc deferredMalloc))
+						{
+							deferredMalloc.offset = (int)pooledMemoryStream.Length;
+							pooledMemoryStream.Write((byte[])deferredMalloc.backingStore, 0, deferredMalloc.count);
+							deferredMallocs.Enqueue(deferredMalloc);
+						}
+					}
+					else
+					{
+						return;
+					}
+				}
+				Func<Task<PooledReadOnlyMemoryStream>> func = await swapAllocator.Write(pooledMemoryStream.GetBuffer().AsMemory(0, (int)pooledMemoryStream.Position));
+				pooledMemoryStream.SetLength(0);
+				while (deferredMallocs.TryDequeue(out DeferredMalloc deferredMalloc))
+				{
+					deferredMalloc.backingStore = func;
+				}
+			}
+		}
+
+		public Task<Func<Task<PooledReadOnlyMemoryStream>>> Write(ReadOnlyMemory<byte> bytes)
+		{
+			int len = bytes.Length;
+			if (len == 0)
+			{
+				return empty;
+			}
+			if (len < 64)
+			{
+				byte[] bytes1 = bytes.ToArray();
+				return Task.FromResult<Func<Task<PooledReadOnlyMemoryStream>>>(() => Task.FromResult(new PooledReadOnlyMemoryStream(bytes1, len)));
+			}
+			if (len < 4096)
+			{
+				DeferredMalloc deferredMalloc = new DeferredMalloc
+				{
+					count = len,
+					backingStore = bytes.ToArray()
+				};
+				queue.Add(new WeakReference<DeferredMalloc>(deferredMalloc, false));
+				asyncManagedSemaphore.Exit();
+				return Task.FromResult<Func<Task<PooledReadOnlyMemoryStream>>>(deferredMalloc.Read);
+			}
+
+			return underlying.Write(bytes);
+		}
+
+		~BuddyMalloc()
+		{
+			asyncManagedSemaphore.Exit();
 		}
 	}
 	/// <summary>
