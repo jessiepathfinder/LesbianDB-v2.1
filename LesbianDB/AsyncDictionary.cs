@@ -131,7 +131,7 @@ namespace LesbianDB
 			await Task.Delay(1);
 			if(weakReference.TryGetTarget(out IAsyncDictionary[] asyncDictionaries)){
 				if(Misc.thisProcess.VirtualMemorySize64 > memorylimit){
-					await ((IFlushableAsyncDictionary)asyncDictionaries[count == 1 ? 0 : RandomNumberGenerator.GetInt32(0, count)]).Flush();
+					await ((IFlushableAsyncDictionary)asyncDictionaries[Misc.FastRandom(0, count)]).Flush();
 				}
 				goto start;
 			}
@@ -169,13 +169,6 @@ namespace LesbianDB
 		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
 		private readonly IAsyncDictionary underlying;
 		private readonly long softMemoryLimit;
-		private static Task RandomWait()
-		{
-			//Prevents unwanted synchronization
-			Span<byte> bytes = stackalloc byte[1];
-			RandomNumberGenerator.Fill(bytes);
-			return Task.Delay(bytes[0] + 1);
-		}
 		public async Task Flush(){
 			await asyncReaderWriterLock.AcquireWriterLock();
 			try{
@@ -199,7 +192,7 @@ namespace LesbianDB
 		}
 		private static async void Collect(WeakReference<CachedAsyncDictionary> weakReference){
 		start:
-			await RandomWait();
+			await Task.Delay(Misc.FastRandom(1, 300));
 			if (weakReference.TryGetTarget(out CachedAsyncDictionary _this)){
 				if(Misc.thisProcess.VirtualMemorySize64 < _this.softMemoryLimit){
 					//No cache eviction until we hit memory limit
@@ -216,7 +209,7 @@ namespace LesbianDB
 					Dictionary<string, CacheLine> select = new Dictionary<string, CacheLine>();
 					while (select.Count * 100 < limit)
 					{
-						KeyValuePair<string, CacheLine> kvp = keyValuePairs[RandomNumberGenerator.GetInt32(0, limit)];
+						KeyValuePair<string, CacheLine> kvp = keyValuePairs[Misc.FastRandom(0, limit)];
 						select.TryAdd(kvp.Key, kvp.Value);
 					}
 					Queue<Task> flushes = new Queue<Task>();

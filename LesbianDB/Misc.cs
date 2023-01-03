@@ -21,6 +21,17 @@ namespace LesbianDB
 	}
 	public static class Misc
 	{
+		public static async void IgnoreException(Task task)
+		{
+			try
+			{
+				await task;
+			}
+			catch
+			{
+
+			}
+		}
 		internal static readonly Process thisProcess = Process.GetCurrentProcess();
 		public static void DieAsap(){
 			Marshal.WriteByte(IntPtr.Zero, 1);
@@ -163,6 +174,34 @@ namespace LesbianDB
 			await using Stream str = new FileStream(tempfile, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.SequentialScan | FileOptions.Asynchronous | FileOptions.DeleteOnClose);
 			await str.WriteAsync(newContent);
 			File.Replace(tempfile, filename, null);
+		}
+		public static IEnumerable<T> JoinEnumerables<T>(IEnumerable<T> first, IEnumerable<T> second){
+			foreach(T temp in first){
+				yield return temp;
+			}
+			foreach(T temp in second){
+				yield return temp;
+			}
+		}
+		[ThreadStatic] private static Random random;
+		public static int FastRandom(int from, int to){
+			Random temp = random;
+			if (temp is null){
+				goto initialize;
+			}
+			//1/256 chance of reseeding for every random number generated
+			if(temp.Next() < 8388608)
+			{
+				goto initialize;
+			}
+			goto finish;
+		initialize:
+			Span<int> seed = stackalloc int[1];
+			RandomNumberGenerator.Fill(MemoryMarshal.AsBytes(seed));
+			temp = new Random(seed[0]);
+			random = temp;
+		finish:
+			return temp.Next(from, to);
 		}
 	}
 	public sealed class ObjectDamagedException : Exception

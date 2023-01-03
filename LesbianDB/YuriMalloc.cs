@@ -17,15 +17,9 @@ namespace LesbianDB
 	/// </summary>
 	public sealed class YuriMalloc : ISwapAllocator
 	{
-		private static Task RandomWait(){
-			//Prevents unwanted synchronization
-			Span<byte> bytes = stackalloc byte[2];
-			RandomNumberGenerator.Fill(bytes);
-			return Task.Delay((BitConverter.ToUInt16(bytes) / 2) + 32768);
-		}
 		private static async void Collect(WeakReference<YuriMalloc> weakReference){
 		start:
-			await RandomWait();
+			await Task.Delay(Misc.FastRandom(1, 100));
 			if(weakReference.TryGetTarget(out YuriMalloc yuriMalloc)){
 				IEnumerable<WeakReference<ForwardingSwapReference>> relocations = null;
 				Queue<WeakReference<ForwardingSwapReference>> liveReferences = new Queue<WeakReference<ForwardingSwapReference>>();
@@ -186,7 +180,7 @@ namespace LesbianDB
 
 		public Task<Func<Task<PooledReadOnlyMemoryStream>>> Write(ReadOnlyMemory<byte> bytes)
 		{
-			return swapAllocators[RandomNumberGenerator.GetInt32(0, swapAllocators.Length)].Write(bytes);
+			return swapAllocators[Misc.FastRandom(0, swapAllocators.Length)].Write(bytes);
 		}
 	}
 	public sealed class BuddyMalloc : ISwapAllocator
@@ -195,8 +189,9 @@ namespace LesbianDB
 		private readonly ConcurrentBag<WeakReference<DeferredMalloc>> queue = new ConcurrentBag<WeakReference<DeferredMalloc>>();
 		private readonly AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
 		private static readonly Task<Func<Task<PooledReadOnlyMemoryStream>>> empty = Task.FromResult<Func<Task<PooledReadOnlyMemoryStream>>>(CreateEmpty);
+		private static readonly byte[] emptyByteArray = new byte[0];
 		private static Task<PooledReadOnlyMemoryStream> CreateEmpty(){
-			return Task.FromResult(new PooledReadOnlyMemoryStream(new byte[0], 0));
+			return Task.FromResult(new PooledReadOnlyMemoryStream(emptyByteArray, 0));
 		}
 		public BuddyMalloc(ISwapAllocator swapAllocator)
 		{

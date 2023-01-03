@@ -45,6 +45,10 @@ namespace LesbianDB.Server
 			public bool SaskiaZram { get; set; }
 			[Option("saskia.ephemeralbucketscount", Required = false, HelpText = "How many buckets should Saskia use in ephemeral mode (PurrfectODD L2 cache or without --persist-dir)", Default = 65536)]
 			public int EphemeralSaskiaBucketsCount { get; set; }
+			[Option("clear-binlog", Required = false, HelpText = "Clears the binlog on startup (only applictable for PurrfectODD/Saskia storage engines). Make sure to backup your on-disk dictionary first if you are using Saskia since Saskia cannot tolerate unexpected power failures!", Default = false)]
+			public bool ClearBinlog { get; set; }
+			[Option("no-read-cache", Required = false, HelpText = "Disables the read cache (useful for databases accessed solely via the Optimistic Functions Framework, recognized by Saskia/PurrfectODD storage engines)", Default = false)]
+			public bool NoReadCache { get; set; }
 		}
 		private static readonly ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();
 		private static ISwapAllocator CreateYuriMalloc(Options options, string comptype)
@@ -68,7 +72,7 @@ namespace LesbianDB.Server
 		{
 			return new EnhancedSequentialAccessDictionary();
 		}
-		private static async Task SmartRestoreBinlog(IAsyncDictionary asyncDictionary, Stream binlog)
+		private static async Task SmartRestoreBinlog(IAsyncDictionary asyncDictionary, Stream binlog, bool clearBinlog)
 		{
 			long height = Convert.ToInt64(await asyncDictionary.Read("LesbianDB_reserved_binlog_height"));
 			if (height > 0)
@@ -76,10 +80,14 @@ namespace LesbianDB.Server
 				binlog.Seek(height, SeekOrigin.Begin);
 			}
 			await YuriDatabaseEngine.RestoreBinlog(binlog, asyncDictionary);
-		}
-		private static async Task SmartRestoreBinlog2(Task tsk, IAsyncDictionary asyncDictionary, Stream binlog){
-			await tsk;
-			await SmartRestoreBinlog(asyncDictionary, binlog);
+			if(height > 0 && clearBinlog){
+				await asyncDictionary.Write("LesbianDB_reserved_binlog_height", null);
+				if(asyncDictionary is IFlushableAsyncDictionary flushableAsyncDictionary){
+					await flushableAsyncDictionary.Flush();
+					binlog.SetLength(0);
+				}
+			}
+			
 		}
 		private static volatile Action exit;
 		private static void Main(string[] args)
@@ -205,10 +213,12 @@ namespace LesbianDB.Server
 						}
 						else
 						{
-							load = SmartRestoreBinlog(asyncDictionary, binlog);
+							load = SmartRestoreBinlog(asyncDictionary, binlog, options.ClearBinlog);
 						}
 					}
-					asyncDictionary = new RandomReplacementWriteThroughCache(asyncDictionary, options.SoftMemoryLimit);
+					if(!options.NoReadCache){
+						asyncDictionary = new RandomReplacementWriteThroughCache(asyncDictionary, options.SoftMemoryLimit);
+					}
 					databaseEngine = binlog is null ? new YuriDatabaseEngine(asyncDictionary) : new YuriDatabaseEngine(asyncDictionary, binlog);
 
 					break;
@@ -239,17 +249,20 @@ namespace LesbianDB.Server
 					}
 					
 					bool saskiazram = options.SaskiaZram;
+					ISwapAllocator mallocator;
 					Func<IFlushableAsyncDictionary> factory = null;
 					if(options.SaskiaZram){
 						factory = CreateCompressedAsyncDictionary;
+						compressionLevel = CompressionLevel.Optimal;
+						mallocator = null;
 					} else{
-						ISwapAllocator mallocator = CreateYuriMalloc(options, comptype);
+						mallocator = CreateYuriMalloc(options, comptype);
 						compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
 						factory = () => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(mallocator), compressionLevel);
 					}
 					long memory = options.SoftMemoryLimit;
-					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, () => new ShardedAsyncDictionary(factory, options.EphemeralSaskiaBucketsCount, memory), out load);
-					IFlushableAsyncDictionary cached = new RandomReplacementWriteThroughCache(flushableAsyncDictionary, memory);
+					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, mallocator is null ? (() => new ShardedAsyncDictionary(factory, options.EphemeralSaskiaBucketsCount, memory)) : (Func<IAsyncDictionary>)(() => new LargeDataOffloader(new ShardedAsyncDictionary(factory, options.EphemeralSaskiaBucketsCount, memory), mallocator, compressionLevel)), out load);
+					IFlushableAsyncDictionary cached = options.NoReadCache ? flushableAsyncDictionary : new RandomReplacementWriteThroughCache(flushableAsyncDictionary, memory);
 					if(binlog is null){
 						databaseEngine = new YuriDatabaseEngine(cached, options.PurrfectODDFlushingInterval);
 					} else{
@@ -257,7 +270,7 @@ namespace LesbianDB.Server
 						async Task func()
 						{
 							await load2;
-							await YuriDatabaseEngine.RestoreBinlog(binlog, flushableAsyncDictionary);
+							await SmartRestoreBinlog(flushableAsyncDictionary, binlog, options.ClearBinlog);
 						}
 						load = func();
 						databaseEngine = new YuriDatabaseEngine(cached, binlog, true, options.PurrfectODDFlushingInterval);

@@ -9,6 +9,7 @@ using System.IO.Compression;
 using System.Threading;
 using LesbianDB.Optimism.YuriTables;
 using System.Numerics;
+using LesbianDB.Optimism.Armitage;
 
 namespace LesbianDB.Tests
 {
@@ -242,8 +243,18 @@ namespace LesbianDB.Tests
 
 
 		//========== LesbianDB ==========
-
-
+		[Test]
+		public async Task SpeculativeExecution(){
+			SpeculativeExecutionManager<int> speculativeExecutionManager = new SpeculativeExecutionManager<int>(SpeculativeIncrement, new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0), long.MaxValue);
+			
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await speculativeExecutionManager.Call(""));
+			}
+		}
+		private static Task<int> SpeculativeIncrement(string input, IOptimisticExecutionScope optimisticExecutionScope){
+			return IncrementOptimisticCounter(optimisticExecutionScope);
+		}
 		[Test]
 		public async Task YuriMallocOptimismCounter()
 		{

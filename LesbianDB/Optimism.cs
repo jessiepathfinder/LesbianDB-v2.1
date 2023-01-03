@@ -33,23 +33,16 @@ namespace LesbianDB.Optimism.Core
 	public sealed class OptimisticExecutionManager{
 		private readonly IDatabaseEngine databaseEngine;
 
-		private static ushort Random2()
-		{
-			//Prevents unwanted synchronization
-			Span<byte> bytes = stackalloc byte[2];
-			RandomNumberGenerator.Fill(bytes);
-			return BitConverter.ToUInt16(bytes);
-		}
 		private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions = new ConcurrentDictionary<string, string>[256];
 		private static async void Collect(WeakReference<ConcurrentDictionary<string, string>[]> weakReference, long softMemoryLimit){
 		start:
-			ushort random = Random2();
-			await Task.Delay((random / 256) + 1);
-			if(Misc.thisProcess.VirtualMemorySize64 < softMemoryLimit){
-				goto start;
-			}
+			await Task.Delay(Misc.FastRandom(1, 300));
+			
 			if(weakReference.TryGetTarget(out ConcurrentDictionary<string, string>[] optimisticCachePartitions)){
-				optimisticCachePartitions[random % 256].Clear();
+				if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
+				{
+					optimisticCachePartitions[Misc.FastRandom(0, 256)].Clear();
+				}
 				goto start;
 			}
 		}

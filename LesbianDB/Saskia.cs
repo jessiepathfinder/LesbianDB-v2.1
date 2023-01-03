@@ -304,6 +304,7 @@ namespace LesbianDB
 
 		public async Task Write(string key, string value)
 		{
+			await File.AppendAllTextAsync("c:\\users\\jessi\\desktop\\ldlog", key + " => " + value + '\n');
 			await locker.AcquireReaderLock();
 			try
 			{
@@ -317,13 +318,6 @@ namespace LesbianDB
 	}
 	public sealed class RandomFlushingCache : IFlushableAsyncDictionary, IAsyncDisposable{
 		private readonly IFlushableAsyncDictionary[] flushableAsyncDictionaries = new IFlushableAsyncDictionary[65536];
-		private static byte Random(out ushort rnd2){
-			Span<byte> bytes = stackalloc byte[3];
-			RandomNumberGenerator.Fill(bytes);
-			rnd2 = BitConverter.ToUInt16(bytes.Slice(0, 2));
-
-			return bytes[2];
-		}
 
 		private readonly bool userandomhash;
 		private readonly Task evictionLoop;
@@ -342,7 +336,6 @@ namespace LesbianDB
 		private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
 		private static async Task EvictionLoop(WeakReference<IFlushableAsyncDictionary[]> weakReference, long softMemoryLimit, CancellationToken cancellationToken){
 		start:
-			byte rnd = Random(out ushort select);
 			if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
 			{
 				try{
@@ -355,7 +348,7 @@ namespace LesbianDB
 			{
 				try
 				{
-					await Task.Delay(rnd + 1, cancellationToken);
+					await Task.Delay(Misc.FastRandom(1, 300), cancellationToken);
 				}
 				catch (OperationCanceledException)
 				{
@@ -364,7 +357,7 @@ namespace LesbianDB
 			}
 			if (weakReference.TryGetTarget(out IFlushableAsyncDictionary[] array))
 			{
-				await array[select].Flush();
+				await array[Misc.FastRandom(0, 256)].Flush();
 				goto start;
 			}
 		}
@@ -415,18 +408,11 @@ namespace LesbianDB
 		}
 		private static void RandomEvict(ConcurrentXHashMap<string>[] cache)
 		{
-			Span<byte> bytes = stackalloc byte[1];
-			RandomNumberGenerator.Fill(bytes);
-			cache[bytes[0]].Clear();
-		}
-		private static Task RandomWait(){
-			Span<byte> bytes = stackalloc byte[1];
-			RandomNumberGenerator.Fill(bytes);
-			return Task.Delay(bytes[0] + 1);
+			cache[Misc.FastRandom(0, 256)].Clear();
 		}
 		private static async void EvictionThread(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit){
 		start:
-			await RandomWait();
+			await Task.Delay(Misc.FastRandom(1, 300));
 			if(weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] cache)){
 				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
 					RandomEvict(cache);
