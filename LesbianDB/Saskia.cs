@@ -304,7 +304,6 @@ namespace LesbianDB
 
 		public async Task Write(string key, string value)
 		{
-			await File.AppendAllTextAsync("c:\\users\\jessi\\desktop\\ldlog", key + " => " + value + '\n');
 			await locker.AcquireReaderLock();
 			try
 			{
