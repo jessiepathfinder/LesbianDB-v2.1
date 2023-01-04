@@ -234,9 +234,25 @@ namespace LesbianDB.Tests
 				await optimisticExecutionScope.TableDeleteRow(testrow);
 				await foreach (Row row in optimisticExecutionScope.TableTrySelectSortedRow("lesbians", "height", CompareOperator.GreaterThan, 200, false))
 				{
-					++count;
+					Assert.AreEqual(4, ++count);
+					Assert.NotNull(row);
+					Assert.AreEqual("hillary-clinton", row["name"]);
+					Assert.AreEqual("3", row["id"]);
+					Assert.AreEqual("210", row["height"]);
 				}
-				Assert.AreEqual(4, count);
+				await foreach (Row row in optimisticExecutionScope.TableSelectAllOrderedBy("lesbians", "height", false)){
+					Assert.NotNull(row);
+					if (++count == 5){
+						Assert.AreEqual("vnch-chan", row["name"]);
+						Assert.AreEqual("2", row["id"]);
+						Assert.AreEqual("155", row["height"]);
+					} else{
+						Assert.AreEqual(6, count);
+						Assert.AreEqual("hillary-clinton", row["name"]);
+						Assert.AreEqual("3", row["id"]);
+						Assert.AreEqual("210", row["height"]);
+					}
+				}
 				return false;
 			});
 		}

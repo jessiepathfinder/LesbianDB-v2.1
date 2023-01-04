@@ -34,7 +34,13 @@ namespace LesbianDB.Optimism.Armitage
 					if(signal.IsFaulted){
 						await signal;
 					}
-					T result = await func(input, optimisticExecutionScope);
+					T result;
+					try{
+						result = await func(input, optimisticExecutionScope);
+					} catch{
+						await signal;
+						throw;
+					}
 					await signal;
 					return result;
 				});

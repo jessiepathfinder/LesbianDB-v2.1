@@ -405,8 +405,55 @@ namespace LesbianDB.Optimism.YuriTables
 					throw new InvalidOperationException("Invalid b-tree operation");
 			}
 		}
+		public static IAsyncEnumerable<BigInteger> BTreeSelectAll(this IOptimisticExecutionScope optimisticExecutionScope, string treename, bool reverse){
+			return BTreeSelectAll(VolatileReadManager.Create(optimisticExecutionScope), treename, reverse, new JsonBTreeNode());
+		}
+		private static async IAsyncEnumerable<BigInteger> BTreeSelectAll(VolatileReadManager volatileReadManager, string treename, bool reverse, JsonBTreeNode jsonBTreeNode){
+			string read = await volatileReadManager.Read(treename);
+			if (read is null)
+			{
+				yield break;
+			}
+			JsonConvert.PopulateObject(read, jsonBTreeNode);
+			string[] list = jsonBTreeNode.list;
+			string first;
+			string last;
+			if (reverse)
+			{
+				first = jsonBTreeNode.high;
+				last = jsonBTreeNode.low;
+			}
+			else
+			{
+				first = jsonBTreeNode.low;
+				last = jsonBTreeNode.high;
+			}
+			if(first is { }){
+				await foreach(BigInteger bigInteger in BTreeSelectAll(volatileReadManager, first, reverse, jsonBTreeNode)){
+					yield return bigInteger;
+				}
+			}
+			if(reverse){
+				int i = list.Length;
+				while (i > 0){
+					yield return BigInteger.Parse(list[--i], NumberStyles.AllowLeadingSign);
+				}
+			} else{
+				foreach(string str in list){
+					yield return BigInteger.Parse(str, NumberStyles.AllowLeadingSign);
+				}
+			}
+			if (last is { })
+			{
+				await foreach (BigInteger bigInteger in BTreeSelectAll(volatileReadManager, last, reverse, jsonBTreeNode))
+				{
+					yield return bigInteger;
+				}
+			}
+		}
 		private static async IAsyncEnumerable<BigInteger> BTreeSelectEqual(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger){
-			await foreach(BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect(treename, CompareOperator.GreaterThanOrEqual, false, bigInteger)){
+			await foreach(BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect(treename, CompareOperator.GreaterThanOrEqual, false, bigInteger))
+			{
 				yield return bigInteger1;
 				yield break;
 			}
@@ -553,7 +600,33 @@ namespace LesbianDB.Optimism.YuriTables
 			}
 			yield break;
 		}
+		public static async IAsyncEnumerable<SortedSetReadResult> ZSelectAll(this IOptimisticExecutionScope optimisticExecutionScope, string name, bool reverse)
+		{
+			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			StringBuilder stringBuilder = new StringBuilder(name);
+			int namelen = name.Length + 1;
+			string treename = stringBuilder.Append("_btree").ToString();
+			stringBuilder.Remove(namelen, 5);
+			await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelectAll(treename, reverse))
+			{
+				string strbigint1 = bigInteger1.ToString();
+
+				await foreach (NewKeyValuePair<string, string> keyValuePair in optimisticExecutionScope.HashEnumerate(stringBuilder.Append(strbigint1).ToString()))
+				{
+					yield return new SortedSetReadResult(keyValuePair.key, bigInteger1, keyValuePair.value);
+				}
+				stringBuilder.Remove(namelen, strbigint1.Length);
+			}
+			yield break;
+		}
 		public static async Task<bool> TryCreateTable(this IOptimisticExecutionScope optimisticExecutionScope, IReadOnlyDictionary<string, ColumnType> keyValuePairs, string name){
+			foreach(ColumnType columnType in keyValuePairs.Values){
+				if(columnType == ColumnType.SortedInt || columnType == ColumnType.UniqueString){
+					goto create;
+				}
+			}
+			throw new InvalidOperationException("Attempted to create write-only table");
+		create:
 			if((await optimisticExecutionScope.Read(name)) is null){
 				optimisticExecutionScope.Write(name, JsonConvert.SerializeObject(keyValuePairs));
 				return true;
@@ -779,6 +852,35 @@ namespace LesbianDB.Optimism.YuriTables
 				stringBuilder.Remove(namelen, temp.Length - namelen);
 			}
 			optimisticExecutionScope.Write(id, null);
+		}
+		public static async IAsyncEnumerable<Row> TableSelectAllOrderedBy(this IOptimisticExecutionScope optimisticExecutionScope, string table, string column, bool reverse)
+		{
+			Task<string> readtsk = optimisticExecutionScope.Read(table);
+			string read1 = new StringBuilder(table).Append("_btree_").Append(column).ToString();
+			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			string read = await readtsk;
+			if (read is null)
+			{
+				throw new InvalidOperationException(new StringBuilder("Table ").Append(table).Append(" does not exist").ToString());
+			}
+			IReadOnlyDictionary<string, ColumnType> schema = Misc.DeserializeObjectWithFastCreate<Dictionary<string, ColumnType>>(read);
+			if (schema[column] != ColumnType.SortedInt)
+			{
+				throw new InvalidOperationException(new StringBuilder("Column ").Append(column).Append(" of table ").Append(table).Append(" is not sorted int").ToString());
+			}
+			await foreach (SortedSetReadResult sortedSetReadResult in optimisticExecutionScope.ZSelectAll(read1, reverse))
+			{
+				Dictionary<string, string> temp = Misc.DeserializeObjectWithFastCreate<Dictionary<string, string>>(await optimisticExecutionScope.Read(sortedSetReadResult.key));
+				if (temp[column] == sortedSetReadResult.bigInteger.ToString())
+				{
+					yield return new Row(sortedSetReadResult.key, table, temp, schema);
+					continue;
+				}
+				//The only way we can get here is database corruption
+				throw new Exception("Index out of sync with data, database may be corrupted (should not reach here)");
+			}
+			yield break;
+
 		}
 	}
 	[JsonConverter(typeof(StringEnumConverter))]
