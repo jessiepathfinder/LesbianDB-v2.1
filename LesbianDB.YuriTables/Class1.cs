@@ -130,7 +130,7 @@ namespace LesbianDB.Optimism.YuriTables
 				string key = arrayname2 + index.ToString();
 
 				//Optimistic optimizations constraint: make sure that we are atomically consistent
-				return optimisticExecutionScope is VolatileReadManager ? await optimisticExecutionScope.Read(key) : (await optimisticExecutionScope.VolatileRead(new string[] {key, arrayname2}))[key];
+				return optimisticExecutionScope is IOptimisticExecutionScope ? await optimisticExecutionScope.Read(key) : (await optimisticExecutionScope.VolatileRead(new string[] {key, arrayname2}))[key];
 			}
 			throw new IndexOutOfRangeException();
 		}
@@ -150,7 +150,7 @@ namespace LesbianDB.Optimism.YuriTables
 				return default;
 			}
 			string key = arrayname2 + (last ? (BigInteger.Parse(end, NumberStyles.AllowLeadingSign) - one).ToString() : start);
-			return new ReadResult(optimisticExecutionScope is VolatileReadManager ? await optimisticExecutionScope.Read(key) : (await optimisticExecutionScope.VolatileRead(new string[] { key, arrayname2 }))[key]);
+			return new ReadResult(optimisticExecutionScope is IOptimisticExecutionScope ? await optimisticExecutionScope.Read(key) : (await optimisticExecutionScope.VolatileRead(new string[] { key, arrayname2 }))[key]);
 		}
 		public static async Task ArraySetValue(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname, BigInteger index, string value)
 		{
@@ -207,7 +207,7 @@ namespace LesbianDB.Optimism.YuriTables
 		public static async IAsyncEnumerable<string> ArrayEnumerate(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname){
 			StringBuilder stringBuilder = new StringBuilder(arrayname).Append('_');
 			string arrayname2 = stringBuilder.ToString();
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			string read = await optimisticExecutionScope.Read(arrayname2);
 			if(read is null){
 				yield break;
@@ -263,7 +263,7 @@ namespace LesbianDB.Optimism.YuriTables
 			};
 		}
 		public static async Task HashSet(this IOptimisticExecutionScope optimisticExecutionScope, string hashname, string key, string value){
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			StringBuilder stringBuilder = new StringBuilder(hashname).Append("_keys");
 			string arrname = stringBuilder.ToString();
 			Task<BigInteger> getarrlen = optimisticExecutionScope.ArrayGetLength(arrname);
@@ -321,14 +321,14 @@ namespace LesbianDB.Optimism.YuriTables
 		}
 		public static async IAsyncEnumerable<NewKeyValuePair<string, string>> HashEnumerate(this IOptimisticExecutionScope optimisticExecutionScope, string hashname)
 		{
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			await foreach(string key in optimisticExecutionScope.ArrayEnumerate(hashname + "_keys")){
 				yield return new NewKeyValuePair<string, string>(key, await optimisticExecutionScope.HashGet(hashname, key));
 			}
 		}
 
 		public static async Task<bool> BTreeTryInsert(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger){
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			string strbigint = bigInteger.ToString();
 			JsonBTreeNode jsonBTreeNode = new JsonBTreeNode();
 			Queue<string> queue = new Queue<string>();
@@ -432,10 +432,10 @@ namespace LesbianDB.Optimism.YuriTables
 			}
 		}
 		public static IAsyncEnumerable<BigInteger> BTreeSelectAll(this IOptimisticExecutionScope optimisticExecutionScope, string treename, bool reverse){
-			return BTreeSelectAll(VolatileReadManager.Create(optimisticExecutionScope), treename, reverse, new JsonBTreeNode());
+			return BTreeSelectAll(IOptimisticExecutionScope.Create(optimisticExecutionScope), treename, reverse, new JsonBTreeNode());
 		}
-		private static async IAsyncEnumerable<BigInteger> BTreeSelectAll(ISnapshotReadScope volatileReadManager, string treename, bool reverse, JsonBTreeNode jsonBTreeNode){
-			string read = await volatileReadManager.Read(treename);
+		private static async IAsyncEnumerable<BigInteger> BTreeSelectAll(ISnapshotReadScope IOptimisticExecutionScope, string treename, bool reverse, JsonBTreeNode jsonBTreeNode){
+			string read = await IOptimisticExecutionScope.Read(treename);
 			if (read is null)
 			{
 				yield break;
@@ -455,7 +455,7 @@ namespace LesbianDB.Optimism.YuriTables
 				last = jsonBTreeNode.high;
 			}
 			if(first is { }){
-				await foreach(BigInteger bigInteger in BTreeSelectAll(volatileReadManager, first, reverse, jsonBTreeNode)){
+				await foreach(BigInteger bigInteger in BTreeSelectAll(IOptimisticExecutionScope, first, reverse, jsonBTreeNode)){
 					yield return bigInteger;
 				}
 			}
@@ -471,7 +471,7 @@ namespace LesbianDB.Optimism.YuriTables
 			}
 			if (last is { })
 			{
-				await foreach (BigInteger bigInteger in BTreeSelectAll(volatileReadManager, last, reverse, jsonBTreeNode))
+				await foreach (BigInteger bigInteger in BTreeSelectAll(IOptimisticExecutionScope, last, reverse, jsonBTreeNode))
 				{
 					yield return bigInteger;
 				}
@@ -499,7 +499,7 @@ namespace LesbianDB.Optimism.YuriTables
 
 		private static async IAsyncEnumerable<BigInteger> BTreeSelect(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger, string strbigint, JsonBTreeNode jsonBTreeNode, bool smaller, bool reverse)
 		{
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			string read = await optimisticExecutionScope.Read(treename);
 			if(read is null){
 				yield break;
@@ -561,7 +561,7 @@ namespace LesbianDB.Optimism.YuriTables
 			}
 		}
 		public static async Task<bool> ZTryDelete(this IOptimisticExecutionScope optimisticExecutionScope, string name, string key){
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			StringBuilder stringBuilder = new StringBuilder(name).Append("_underlying_").Append(key);
 			string temp = stringBuilder.ToString();
 			Task<string> readtsk = optimisticExecutionScope.Read(temp);
@@ -580,7 +580,7 @@ namespace LesbianDB.Optimism.YuriTables
 			if(value is null){
 				throw new InvalidOperationException("Use ZTryDelete instead");
 			}
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			StringBuilder stringBuilder = new StringBuilder(name);
 			int namelen = name.Length + 1;
 			string btreename = stringBuilder.Append("_btree").ToString();
@@ -611,7 +611,7 @@ namespace LesbianDB.Optimism.YuriTables
 			await btreeadd;
 		}
 		public static async IAsyncEnumerable<SortedSetReadResult> ZSelect(this IOptimisticExecutionScope optimisticExecutionScope, string name, CompareOperator compareOperator, BigInteger bigInteger, bool reverse){
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			StringBuilder stringBuilder = new StringBuilder(name);
 			int namelen = name.Length + 1;
 			string treename = stringBuilder.Append("_btree").ToString();
@@ -628,7 +628,7 @@ namespace LesbianDB.Optimism.YuriTables
 		}
 		public static async IAsyncEnumerable<SortedSetReadResult> ZSelectAll(this IOptimisticExecutionScope optimisticExecutionScope, string name, bool reverse)
 		{
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			StringBuilder stringBuilder = new StringBuilder(name);
 			int namelen = name.Length + 1;
 			string treename = stringBuilder.Append("_btree").ToString();
@@ -698,7 +698,7 @@ namespace LesbianDB.Optimism.YuriTables
 				throw new InvalidOperationException("More columns set than expected");
 			}
 
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 
 			//Update indexes
 			foreach(KeyValuePair<string, ColumnType> keyValuePair in tableDescriptor){
@@ -742,7 +742,7 @@ namespace LesbianDB.Optimism.YuriTables
 			Task<string> readtsk = optimisticExecutionScope.Read(table);
 			string read1 = new StringBuilder(table).Append("_btree_").Append(column).ToString();
 			string strbigint = bigInteger.ToString();
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			string read = await readtsk;
 			if (read is null)
 			{
@@ -883,7 +883,7 @@ namespace LesbianDB.Optimism.YuriTables
 		{
 			Task<string> readtsk = optimisticExecutionScope.Read(table);
 			string read1 = new StringBuilder(table).Append("_btree_").Append(column).ToString();
-			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			optimisticExecutionScope = IOptimisticExecutionScope.Create(optimisticExecutionScope);
 			string read = await readtsk;
 			if (read is null)
 			{
