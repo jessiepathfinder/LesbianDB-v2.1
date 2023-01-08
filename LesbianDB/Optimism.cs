@@ -30,7 +30,11 @@ namespace LesbianDB.Optimism.Core
 	public sealed class OptimisticFault : Exception{
 		
 	}
-	public sealed class OptimisticExecutionManager{
+	public interface IOptimisticExecutionManager{
+		public Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction);
+	}
+	public sealed class OptimisticExecutionManager : IOptimisticExecutionManager
+	{
 		private readonly IDatabaseEngine databaseEngine;
 
 		private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions = new ConcurrentDictionary<string, string>[256];
@@ -340,16 +344,19 @@ namespace LesbianDB.Optimism.Core
 			}
 		}
 	}
+	public interface ISnapshotReadScope : IOptimisticExecutionScope{
+		
+	}
 	/// <summary>
 	/// A wrapper designed to convert serializable optimistic locking reads into snapshotting optimitic locking reads
 	/// </summary>
-	public sealed class VolatileReadManager : IOptimisticExecutionScope
+	public sealed class VolatileReadManager : ISnapshotReadScope
 	{
-		public static VolatileReadManager Create(IOptimisticExecutionScope underlying)
+		public static ISnapshotReadScope Create(IOptimisticExecutionScope underlying)
 		{
-			if (underlying is VolatileReadManager volatileReadManager)
+			if (underlying is ISnapshotReadScope snapshotReadScope)
 			{
-				return volatileReadManager;
+				return snapshotReadScope;
 			}
 			return new VolatileReadManager(underlying);
 		}

@@ -10,6 +10,7 @@ using System.Threading;
 using LesbianDB.Optimism.YuriTables;
 using System.Numerics;
 using LesbianDB.Optimism.Armitage;
+using LesbianDB.Optimism.Snapshot;
 
 namespace LesbianDB.Tests
 {
@@ -20,7 +21,43 @@ namespace LesbianDB.Tests
 		{
 			
 		}
-
+		//========== LesbianDB.Snapshots ===========
+		[Test]
+		public async Task SnapshotConsistentOptimisticCounter()
+		{
+			SnapshotConsistentExecutioner optimisticExecutionManager = new SnapshotConsistentExecutioner("snapshots", new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0));
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+		}
+		[Test]
+		public async Task Snapshot(){
+			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				Assert.IsNull(await optimisticExecutionScope.SnapshotRead("snapshots", "test"));
+				Assert.IsNull(await optimisticExecutionScope.SnapshotRead("snapshots", "test", 0));
+				Task Set(string value){
+					return optimisticExecutionScope.SnapshotWrite("snapshots", "test", value);
+				}
+				async Task SetAndCheck(string str, ulong id){
+					await Set(str);
+					Assert.AreEqual(str, await optimisticExecutionScope.SnapshotRead("snapshots", "test"));
+					Assert.AreEqual(str, await optimisticExecutionScope.SnapshotRead("snapshots", "test", id));
+				}
+				await SetAndCheck("a", 0);
+				await SetAndCheck("b", 0);
+				await Set(null);
+				Assert.IsNull(await optimisticExecutionScope.SnapshotRead("snapshots", "test"));
+				Assert.IsNull(await optimisticExecutionScope.SnapshotRead("snapshots", "test", 0));
+				await SetAndCheck("c", 0);
+				await optimisticExecutionScope.IncrementSnapshotCounter("snapshots");
+				Assert.AreEqual("c", await optimisticExecutionScope.SnapshotRead("snapshots", "test", 0));
+				Assert.AreEqual("c", await optimisticExecutionScope.SnapshotRead("snapshots", "test", 1));
+				await SetAndCheck("d", 1);
+				Assert.AreEqual("c", await optimisticExecutionScope.SnapshotRead("snapshots", "test", 0));
+				return false;
+			});
+		}
 
 		//========== LesbianDB.YuriTables ==========
 		[Test]

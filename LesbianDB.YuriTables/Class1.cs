@@ -28,35 +28,37 @@ namespace LesbianDB.Optimism.YuriTables
 			return Convert.ToBase64String(bytes, Base64FormattingOptions.None);
 		}
 		public static async Task ArrayPushStart(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname, string item){
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string arrayname2 = arrayname + '_';
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if(read is null){
-				optimisticExecutionScope.Write(arrayname, "0_1");
+				optimisticExecutionScope.Write(arrayname2, "0_1");
 				optimisticExecutionScope.Write(arrayname + "_0", item);
 			} else{
 				string[] header = read.Split('_');
 				string key = (BigInteger.Parse(header[0], NumberStyles.AllowLeadingSign) - 1).ToString();
-				optimisticExecutionScope.Write(new StringBuilder(arrayname).Append('_').Append(key).ToString(), item);
-				optimisticExecutionScope.Write(arrayname, new StringBuilder(key).Append('_').Append(header[1]).ToString());
+				optimisticExecutionScope.Write(arrayname2 + key, item);
+				optimisticExecutionScope.Write(arrayname2, new StringBuilder(key).Append('_').Append(header[1]).ToString());
 			}
 		}
 		public static async Task ArrayPushEnd(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname, string item)
 		{
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string arrayname2 = arrayname + '_';
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if (read is null)
 			{
-				optimisticExecutionScope.Write(arrayname, "0_1");
+				optimisticExecutionScope.Write(arrayname2, "0_1");
 				optimisticExecutionScope.Write(arrayname + "_0", item);
 			}
 			else
 			{
 				string[] header = read.Split('_');
 				BigInteger key = BigInteger.Parse(header[1], NumberStyles.AllowLeadingSign);
-				optimisticExecutionScope.Write(new StringBuilder(arrayname).Append('_').Append(key.ToString()).ToString(), item);
-				optimisticExecutionScope.Write(arrayname, new StringBuilder(header[0]).Append('_').Append((key + 1).ToString()).ToString());
+				optimisticExecutionScope.Write(arrayname2 + key, item);
+				optimisticExecutionScope.Write(arrayname2, new StringBuilder(header[0]).Append('_').Append((key + 1).ToString()).ToString());
 			}
 		}
 		public static async Task<BigInteger> ArrayGetLength(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname){
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string read = await optimisticExecutionScope.Read(arrayname + '_');
 			if(read is null){
 				return BigInteger.Zero;
 			}
@@ -65,7 +67,8 @@ namespace LesbianDB.Optimism.YuriTables
 		}
 		public static async Task<ReadResult> ArrayTryPopFirst(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname)
 		{
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string arrayname2 = arrayname + '_';
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if (read is null)
 			{
 				return default;
@@ -76,18 +79,19 @@ namespace LesbianDB.Optimism.YuriTables
 				return default;
 			}
 			BigInteger bigInteger = BigInteger.Parse(header[0], NumberStyles.AllowLeadingSign);
-			string key = new StringBuilder(arrayname).Append('_').Append(bigInteger.ToString()).ToString();
+			string key = arrayname2 + bigInteger.ToString();
 
 			//Optimistic optimizations constraint: make sure that we are atomically consistent
-			string value = (await optimisticExecutionScope.VolatileRead(new string[] { key, arrayname }))[key];
+			string value = (await optimisticExecutionScope.VolatileRead(new string[] { key, arrayname2 }))[key];
 
 			optimisticExecutionScope.Write(key, null);
-			optimisticExecutionScope.Write(arrayname, new StringBuilder((bigInteger + 1).ToString()).Append('_').Append(header[1]).ToString());
+			optimisticExecutionScope.Write(arrayname2, new StringBuilder((bigInteger + 1).ToString()).Append('_').Append(header[1]).ToString());
 			return new ReadResult(value);
 		}
 		public static async Task<ReadResult> ArrayTryPopLast(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname)
 		{
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string arrayname2 = arrayname + '_';
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if (read is null)
 			{
 				return default;
@@ -98,21 +102,22 @@ namespace LesbianDB.Optimism.YuriTables
 				return default;
 			}
 			string bigInteger = (BigInteger.Parse(header[1], NumberStyles.AllowLeadingSign) - 1).ToString();
-			string key = new StringBuilder(arrayname).Append('_').Append(bigInteger).ToString();
+			string key = arrayname2 + bigInteger;
 
 			//Optimistic optimizations constraint: make sure that we are atomically consistent
-			IReadOnlyDictionary<string, string> dict = await optimisticExecutionScope.VolatileRead(new string[] { key, arrayname });
+			IReadOnlyDictionary<string, string> dict = await optimisticExecutionScope.VolatileRead(new string[] { key, arrayname2 });
 
 			optimisticExecutionScope.Write(key, null);
 
-			optimisticExecutionScope.Write(arrayname, new StringBuilder(header[0]).Append('_').Append(bigInteger).ToString());
+			optimisticExecutionScope.Write(arrayname2, new StringBuilder(header[0]).Append('_').Append(bigInteger).ToString());
 			return new ReadResult(dict[key]);
 		}
 		public static async Task<string> ArrayGetValue(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname, BigInteger index){
-			if(index.Sign < 0){
+			string arrayname2 = arrayname + '_';
+			if (index.Sign < 0){
 				throw new IndexOutOfRangeException("negative array index");
 			}
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if (read is null)
 			{
 				throw new IndexOutOfRangeException();
@@ -122,20 +127,39 @@ namespace LesbianDB.Optimism.YuriTables
 			BigInteger end = BigInteger.Parse(header[1], NumberStyles.AllowLeadingSign);
 			index += start;
 			if(end > index){
-				string key = new StringBuilder(arrayname).Append('_').Append(index.ToString()).ToString();
+				string key = arrayname2 + index.ToString();
 
 				//Optimistic optimizations constraint: make sure that we are atomically consistent
-				return optimisticExecutionScope is VolatileReadManager ? await optimisticExecutionScope.Read(key) : (await optimisticExecutionScope.VolatileRead(new string[] {key, arrayname}))[key];
+				return optimisticExecutionScope is VolatileReadManager ? await optimisticExecutionScope.Read(key) : (await optimisticExecutionScope.VolatileRead(new string[] {key, arrayname2}))[key];
 			}
 			throw new IndexOutOfRangeException();
 		}
+		private static readonly BigInteger one = BigInteger.One;
+		public static async Task<ReadResult> ArrayTryGetValue(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname, bool last)
+		{
+			string arrayname2 = arrayname + '_';
+			string read = await optimisticExecutionScope.Read(arrayname2);
+			if (read is null)
+			{
+				return default;
+			}
+			string[] header = read.Split('_');
+			string start = header[0];
+			string end = header[1];
+			if(start == end){
+				return default;
+			}
+			string key = arrayname2 + (last ? (BigInteger.Parse(end, NumberStyles.AllowLeadingSign) - one).ToString() : start);
+			return new ReadResult(optimisticExecutionScope is VolatileReadManager ? await optimisticExecutionScope.Read(key) : (await optimisticExecutionScope.VolatileRead(new string[] { key, arrayname2 }))[key]);
+		}
 		public static async Task ArraySetValue(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname, BigInteger index, string value)
 		{
+			string arrayname2 = arrayname + '_';
 			if (index.Sign < 0)
 			{
 				throw new IndexOutOfRangeException("negative array index");
 			}
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if (read is null)
 			{
 				throw new IndexOutOfRangeException();
@@ -145,15 +169,16 @@ namespace LesbianDB.Optimism.YuriTables
 			index += BigInteger.Parse(header[0], NumberStyles.AllowLeadingSign);
 			if (end > index)
 			{
-				optimisticExecutionScope.Write(new StringBuilder(arrayname).Append('_').Append(index.ToString()).ToString(), value);
+				optimisticExecutionScope.Write(arrayname2 + index.ToString(), value);
 				return;
 			}
 			throw new IndexOutOfRangeException();
 		}
 		public static void ClearArray(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname){
-			optimisticExecutionScope.Write(arrayname, "0_0");
+			optimisticExecutionScope.Write(arrayname + '_', "0_0");
 		}
 		public static async Task ResizeArray(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname, BigInteger start, BigInteger length){
+			string arrayname2 = arrayname + '_';
 			if (start.Sign < 0)
 			{
 				throw new IndexOutOfRangeException("negative array index");
@@ -161,7 +186,7 @@ namespace LesbianDB.Optimism.YuriTables
 			if(length.Sign < 0){
 				throw new IndexOutOfRangeException("negative array size");
 			}
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if (read is null)
 			{
 				if (length.IsZero && start.IsZero)
@@ -177,17 +202,18 @@ namespace LesbianDB.Optimism.YuriTables
 			if(end1 > BigInteger.Parse(header[1], NumberStyles.AllowLeadingSign)){
 				throw new IndexOutOfRangeException();
 			}
-			optimisticExecutionScope.Write(arrayname, new StringBuilder(start1.ToString()).Append('_').Append(end1).ToString());
+			optimisticExecutionScope.Write(arrayname2, new StringBuilder(start1.ToString()).Append('_').Append(end1).ToString());
 		}
 		public static async IAsyncEnumerable<string> ArrayEnumerate(this IOptimisticExecutionScope optimisticExecutionScope, string arrayname){
+			StringBuilder stringBuilder = new StringBuilder(arrayname).Append('_');
+			string arrayname2 = stringBuilder.ToString();
 			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
-			string read = await optimisticExecutionScope.Read(arrayname);
+			string read = await optimisticExecutionScope.Read(arrayname2);
 			if(read is null){
 				yield break;
 			}
 			string[] header = read.Split('_');
-			StringBuilder stringBuilder = new StringBuilder(arrayname).Append('_');
-			int namelen = arrayname.Length + 1;
+			int namelen = arrayname2.Length;
 			BigInteger start = BigInteger.Parse(header[0], NumberStyles.AllowLeadingSign);
 			BigInteger end = BigInteger.Parse(header[1], NumberStyles.AllowLeadingSign);
 			for(BigInteger i = start; i < end; ){
@@ -408,7 +434,7 @@ namespace LesbianDB.Optimism.YuriTables
 		public static IAsyncEnumerable<BigInteger> BTreeSelectAll(this IOptimisticExecutionScope optimisticExecutionScope, string treename, bool reverse){
 			return BTreeSelectAll(VolatileReadManager.Create(optimisticExecutionScope), treename, reverse, new JsonBTreeNode());
 		}
-		private static async IAsyncEnumerable<BigInteger> BTreeSelectAll(VolatileReadManager volatileReadManager, string treename, bool reverse, JsonBTreeNode jsonBTreeNode){
+		private static async IAsyncEnumerable<BigInteger> BTreeSelectAll(ISnapshotReadScope volatileReadManager, string treename, bool reverse, JsonBTreeNode jsonBTreeNode){
 			string read = await volatileReadManager.Read(treename);
 			if (read is null)
 			{

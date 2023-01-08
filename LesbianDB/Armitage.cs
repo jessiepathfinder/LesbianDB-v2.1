@@ -11,13 +11,13 @@ namespace LesbianDB.Optimism.Armitage
 	public sealed class SpeculativeExecutionManager<T>
 	{
 		private readonly Func<string, IOptimisticExecutionScope, Task<T>> func;
-		private readonly OptimisticExecutionManager optimisticExecutionManager;
+		private readonly IOptimisticExecutionManager optimisticExecutionManager;
 
 		private sealed class SpeculativeExecutionResult{
 			private readonly Task<T> task;
 			private readonly TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>();
 
-			public SpeculativeExecutionResult(OptimisticExecutionManager optimisticExecutionManager, string input, Func<string, IOptimisticExecutionScope, Task<T>> func, Task lastrun)
+			public SpeculativeExecutionResult(IOptimisticExecutionManager optimisticExecutionManager, string input, Func<string, IOptimisticExecutionScope, Task<T>> func, Task lastrun)
 			{
 				Task signal = taskCompletionSource.Task;
 				Task waitOne = Task.WhenAny(signal, lastrun);
