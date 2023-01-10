@@ -418,10 +418,10 @@ namespace LesbianDB.Optimism.YuriTables
 				case CompareOperator.GreaterThan:
 					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), false, reverse);
 				case CompareOperator.GreaterThanOrEqual:
-					bigInteger -= 1;
+					bigInteger -= one;
 					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), false, reverse);
 				case CompareOperator.LessThanOrEqual:
-					bigInteger += 1;
+					bigInteger += one;
 					return optimisticExecutionScope.BTreeSelect(treename, bigInteger, bigInteger.ToString(), new JsonBTreeNode(), true, reverse);
 				case CompareOperator.EqualTo:
 					return optimisticExecutionScope.BTreeSelectEqual(treename, bigInteger);
@@ -480,10 +480,8 @@ namespace LesbianDB.Optimism.YuriTables
 		private static async IAsyncEnumerable<BigInteger> BTreeSelectEqual(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger){
 			await foreach(BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect(treename, CompareOperator.GreaterThanOrEqual, false, bigInteger))
 			{
-				if(bigInteger1 > bigInteger){
-					yield break;
-				}
 				yield return bigInteger1;
+				yield break;
 			}
 		}
 		private static async IAsyncEnumerable<BigInteger> BTreeSelectNotEqual(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger, bool reverse){
