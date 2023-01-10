@@ -93,6 +93,10 @@ namespace LesbianDB.Server
 		private static void Main(string[] args)
 		{
 			Console.WriteLine("LesbianDB v2.1 server\nMade by Jessie Lesbian (Discord: jessielesbian#8060)\n\nParsing arguments...");
+
+			Console.WriteLine("Registering unobserved task exception handler...");
+			TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
+
 			Options options = Parser.Default.ParseArguments<Options>(args).Value;
 			
 			if (options is null){
@@ -363,6 +367,16 @@ namespace LesbianDB.Server
 			coreloop.Wait();
 			inhibitDomainExit.Wait();
 		}
+		private sealed class UnobservedTaskException : Exception{
+			public UnobservedTaskException(Exception e) : base("Unobserved task exception", e){
+				
+			}
+		}
+		private static void TaskScheduler_UnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs e)
+		{
+			throw new UnobservedTaskException(e.Exception);
+		}
+
 		private static IFlushableAsyncDictionary CreateSaskia2(ISwapHandle swapHandle){
 			return new EnhancedSequentialAccessDictionary(swapHandle, true);
 		}

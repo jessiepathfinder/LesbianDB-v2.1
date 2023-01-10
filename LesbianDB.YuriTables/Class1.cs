@@ -480,8 +480,10 @@ namespace LesbianDB.Optimism.YuriTables
 		private static async IAsyncEnumerable<BigInteger> BTreeSelectEqual(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger){
 			await foreach(BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect(treename, CompareOperator.GreaterThanOrEqual, false, bigInteger))
 			{
+				if(bigInteger1 > bigInteger){
+					yield break;
+				}
 				yield return bigInteger1;
-				yield break;
 			}
 		}
 		private static async IAsyncEnumerable<BigInteger> BTreeSelectNotEqual(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger, bool reverse){

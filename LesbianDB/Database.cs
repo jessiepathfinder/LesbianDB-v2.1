@@ -131,12 +131,16 @@ namespace LesbianDB
 		private readonly AsyncMutex binlogLock;
 		private readonly Stream binlog;
 		private readonly AsyncReaderWriterLock[] asyncReaderWriterLocks = new AsyncReaderWriterLock[65536];
+		private readonly ConcurrentQueue<Exception> damages = new ConcurrentQueue<Exception>();
+		private readonly AsyncReaderWriterLock damageCheckingLock = new AsyncReaderWriterLock();
 		private async Task WriteAndFlushBinlog(byte[] buffer, int len){
 			await binlog.WriteAsync(buffer, 0, len);
 			await binlog.FlushAsync();
 		}
 		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
 		{
+			byte minDamagesHeight = 0;
+			
 			//Lock checking
 			Dictionary<ushort, bool> lockLevels = new Dictionary<ushort, bool>();
 			bool write = writes.Count > 0;
@@ -185,9 +189,11 @@ namespace LesbianDB
 					await asyncReaderWriterLocks[id].AcquireReaderLock();
 				}
 			}
+			await damageCheckingLock.AcquireReaderLock();
 			try
 			{
-				foreach (string read in conditions.Keys){
+				foreach (string read in conditions.Keys)
+				{
 					pendingReads.Add(read, asyncDictionary.Read(read));
 				}
 				foreach (string read in reads)
@@ -201,17 +207,21 @@ namespace LesbianDB
 				{
 					readResults.TryAdd(read, await pendingReads[read]);
 				}
-				if(!write){
+
+				if (!write)
+				{
 					return readResults;
 				}
 				foreach (KeyValuePair<string, string> kvp in conditions)
 				{
-					if(kvp.Value != await pendingReads[kvp.Key]){
+					if (kvp.Value != await pendingReads[kvp.Key])
+					{
 						return readResults;
 					}
 				}
 				writes = Misc.ScrubNoEffectWrites(writes, pendingReads);
-				if(writes.Count == 0){
+				if (writes.Count == 0)
+				{
 					return readResults;
 				}
 				long logheight = 0;
@@ -236,14 +246,17 @@ namespace LesbianDB
 					BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
 					binlocked = true;
 					await binlogLock.Enter();
-					if(writefastrecover){
+					if (writefastrecover)
+					{
 						logheight = binlog.Position;
 					}
 					writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
 				}
 				await flushLock.AcquireReaderLock();
-				try{
-					if(logheight > 0){
+				try
+				{
+					if (logheight > 0)
+					{
 						writeTasks.Enqueue(asyncDictionary.Write("LesbianDB_reserved_binlog_height", logheight.ToString()));
 					}
 					foreach (KeyValuePair<string, string> keyValuePair in writes)
@@ -254,36 +267,61 @@ namespace LesbianDB
 					{
 						await tsk;
 					}
-				} finally{
+				}
+				finally
+				{
 					flushLock.ReleaseReaderLock();
 				}
 			}
+			catch (Exception e){
+				++minDamagesHeight;
+				damages.Enqueue(e);
+				throw;
+			}
 			finally
 			{
-				if (binlocked)
-				{
-					try
+				try{
+					if (binlocked)
 					{
-						//Binlog writing will always start after binlog locking
-						if (writeBinlog is { })
+						try
 						{
-							await writeBinlog;
+							//Binlog writing will always start after binlog locking
+							if (writeBinlog is { })
+							{
+								await writeBinlog;
+							}
+						}
+						finally
+						{
+							binlogLock.Exit();
 						}
 					}
-					finally
+					foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 					{
-						binlogLock.Exit();
+						if (keyValuePair.Value)
+						{
+							asyncReaderWriterLocks[keyValuePair.Key].ReleaseWriterLock();
+						}
+						else
+						{
+							asyncReaderWriterLocks[keyValuePair.Key].ReleaseReaderLock();
+						}
 					}
-				}
-				foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
-				{
-					if (keyValuePair.Value)
-					{
-						asyncReaderWriterLocks[keyValuePair.Key].ReleaseWriterLock();
-					}
-					else
-					{
-						asyncReaderWriterLocks[keyValuePair.Key].ReleaseReaderLock();
+				} catch(Exception e){
+					++minDamagesHeight;
+					damages.Enqueue(e);
+					throw;
+				} finally{
+					damageCheckingLock.ReleaseReaderLock();
+					await damageCheckingLock.AcquireWriterLock();
+					try{
+						if (damages.Count > minDamagesHeight)
+						{
+							Exception[] arrayOfDamages = damages.ToArray();
+							throw new ObjectDamagedException(arrayOfDamages.Length == 1 ? arrayOfDamages[0] : new AggregateException(arrayOfDamages));
+						}
+					} finally{
+						damageCheckingLock.ReleaseWriterLock();
 					}
 				}
 			}

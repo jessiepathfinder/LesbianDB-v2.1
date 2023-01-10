@@ -184,6 +184,9 @@ namespace LesbianDB
 			}
 			await locker.AcquireWriterLock();
 			try{
+				if(damage is { }){
+					throw new ObjectDamagedException(damage);
+				}
 				using PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool);
 				using(DeflateStream deflateStream = new DeflateStream(memoryStream, compressionLevel, true)){
 					BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
@@ -252,15 +255,24 @@ namespace LesbianDB
 				else {
 					await swapHandle.Set(memoryStream.GetBuffer().AsMemory(0, (int)memoryStream.Position));
 				}
-			} finally{
+			}
+			catch(Exception e){
+				damage = e;
+				throw;
+			}
+			finally{
 				locker.ReleaseWriterLock();
 			}
 		}
+		private Exception damage;
 
 		public async Task<string> Read(string key)
 		{
 			await locker.AcquireReaderLock();
 			try{
+				if(damage is { }){
+					throw new ObjectDamagedException(damage);
+				}
 				if (cache.TryGetValue(key, out string value))
 				{
 					return value;
@@ -307,6 +319,10 @@ namespace LesbianDB
 			await locker.AcquireReaderLock();
 			try
 			{
+				if (damage is { })
+				{
+					throw new ObjectDamagedException(damage);
+				}
 				cache[key] = value;
 			}
 			finally
