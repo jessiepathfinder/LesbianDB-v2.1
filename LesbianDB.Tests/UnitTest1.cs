@@ -142,9 +142,10 @@ namespace LesbianDB.Tests
 					await optimisticExecutionScope.BTreeTryInsert("mytree", bigInteger);
 				}
 				BigInteger reference = BigInteger.Zero;
-				await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect("mytree", CompareOperator.LessThan, false, 100)){
+				await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect("mytree", CompareOperator.LessThanOrEqual, false, 100)){
 					Assert.AreEqual(reference++, bigInteger1);
 				}
+				Assert.AreEqual("101", reference.ToString());
 				return false;
 			});
 		}

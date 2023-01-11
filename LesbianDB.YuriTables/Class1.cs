@@ -704,7 +704,7 @@ namespace LesbianDB.Optimism.YuriTables
 			foreach(KeyValuePair<string, ColumnType> keyValuePair in tableDescriptor){
 				ColumnType rowType = keyValuePair.Value;
 				if(rowType == ColumnType.DataString){
-					break;
+					continue;
 				}
 				string key = keyValuePair.Key;
 				string temp = "";
