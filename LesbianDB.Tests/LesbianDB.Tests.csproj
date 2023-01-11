@@ -20,9 +20,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\LesbianDB.IntelliEX\LesbianDB.IntelliEX.csproj" />
     <ProjectReference Include="..\LesbianDB.Snapshots\LesbianDB.Snapshots.csproj" />
     <ProjectReference Include="..\LesbianDB.YuriTables\LesbianDB.YuriTables.csproj" />
-    <ProjectReference Include="..\LesbianDB\LesbianDB.csproj" />
   </ItemGroup>
 
 </Project>

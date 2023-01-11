@@ -11,6 +11,7 @@ using LesbianDB.Optimism.YuriTables;
 using System.Numerics;
 using LesbianDB.Optimism.Armitage;
 using LesbianDB.Optimism.Snapshot;
+using LesbianDB.IntelliEX;
 
 namespace LesbianDB.Tests
 {
@@ -20,6 +21,16 @@ namespace LesbianDB.Tests
 		public void Setup()
 		{
 			
+		}
+		//========== LesbianDB.IntelliEX ===========
+		[Test]
+		public async Task IntelliEXOptimisticCointer()
+		{
+			IntelligentExecutionManager intelligentExecutionManager = new IntelligentExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), "thectr");
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await intelligentExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
 		}
 		//========== LesbianDB.Snapshots ===========
 		[Test]
@@ -207,7 +218,7 @@ namespace LesbianDB.Tests
 		}
 		[Test]
 		public async Task Table(){
-			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+			await new IntelligentExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), "thectr").ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
 				//insert rows
 				await optimisticExecutionScope.TryCreateTable(new Dictionary<string, ColumnType>
 				{
