@@ -138,6 +138,13 @@ namespace LesbianDB.IntelliEX
 		}
 		private static readonly BigInteger one = BigInteger.One;
 		private static readonly BigInteger zero = BigInteger.Zero;
+		private static IEnumerable<string> GetKeys(KeyValuePair<string, string>[] keyValuePairs)
+		{
+			foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs)
+			{
+				yield return keyValuePair.Key;
+			}
+		}
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction)
 		{
 			string read = (await databaseEngine1.Execute(counterNameArr, emptyDictionary, emptyDictionary))[counterName];
@@ -175,30 +182,28 @@ namespace LesbianDB.IntelliEX
 					scope.reads.TryAdd(keyValuePair.Key, keyValuePair.Value);
 				}
 			}
-			T result = default;
-			Exception exception = null;
+			T result;
 			try
 			{
 				result = await optimisticFunction(scope);
 			}
-			catch (Exception e)
+			catch (OptimisticFault)
 			{
-				exception = e;
+				repopulate = await databaseEngine1.Execute(GetKeys(scope.reads.ToArray()), emptyDictionary, emptyDictionary);
+				goto start;
+			}
+			KeyValuePair<string, string>[] keyValuePair2 = scope.writes.ToArray();
+			if(keyValuePair2.Length == 0){
+				return result;
+			}
+			Dictionary<string, string> writes = new Dictionary<string, string>();
+			foreach(KeyValuePair<string, string> keyValuePair3 in keyValuePair2){
+				string val = keyValuePair3.Value;
+				writes.Add(keyValuePair3.Key, val is null ? read : (appended + val));
 			}
 			Dictionary<string, string> reads = new Dictionary<string, string>(scope.reads.ToArray());
-			Dictionary<string, string> writes = new Dictionary<string, string>();
-			if(exception is null){
-				foreach(KeyValuePair<string, string> keyValuePair in scope.writes.ToArray()){
-					string value = keyValuePair.Value;
-					if (value is null) {
-						value = read;
-					} else{
-						value = appended + value;
-					}
-					writes.Add(keyValuePair.Key, value);
-				}
-			}
-			repopulate = await databaseEngine1.Execute(reads.Keys, writes.Count == 0 ? emptyDictionary : reads, writes);
+			
+			repopulate = await databaseEngine1.Execute(reads.Keys, reads, writes);
 			foreach (KeyValuePair<string, string> keyValuePair1 in repopulate)
 			{
 				if (reads[keyValuePair1.Key] == keyValuePair1.Value)
@@ -207,12 +212,7 @@ namespace LesbianDB.IntelliEX
 				}
 				goto start;
 			}
-			if (exception is null)
-			{
-				return result;
-			}
-			ExceptionDispatchInfo.Throw(exception);
-			throw exception;
+			return result;
 		}
 	}
 }
