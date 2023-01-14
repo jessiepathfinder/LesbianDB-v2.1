@@ -261,7 +261,6 @@ namespace LesbianDB{
 					}))[redoLogSyncResult.id] == redoLogSyncResult.read){
 						goto nowrite;
 					}
-					throw new Exception();
 					goto start;
 				}
 			} finally{
