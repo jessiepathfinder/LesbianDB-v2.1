@@ -527,4 +527,61 @@ namespace LesbianDB
 		}
 
 	}
+	public sealed class SessionLockingDatabaseEngine : IDatabaseEngine{
+		private readonly IDatabaseEngine underlying;
+		private readonly string nonce;
+		private readonly string lockkey;
+		private static readonly string[] emptyStringArray = new string[0];
+		public SessionLockingDatabaseEngine(IDatabaseEngine underlying, string lockkey, out Task getlock)
+		{
+			this.underlying = underlying ?? throw new ArgumentNullException(nameof(underlying));
+			this.lockkey = lockkey ?? throw new ArgumentNullException(nameof(lockkey));
+			this.underlying = underlying ?? throw new ArgumentNullException(nameof(underlying));
+			Span<byte> bytes = stackalloc byte[32];
+			RandomNumberGenerator.Fill(bytes);
+			nonce = Convert.ToBase64String(bytes, Base64FormattingOptions.None);
+			getlock = underlying.Execute(emptyStringArray, SafeEmptyReadOnlyDictionary<string, string>.instance, new Dictionary<string, string>() {
+				{lockkey, nonce}
+			});
+		}
+		private IEnumerable<string> AppendToEnd(IEnumerable<string> original, string key){
+			foreach(string str in original){
+				if(str == key){
+					throw new InvalidOperationException("Session lock should not be checked by user code");
+				}
+				yield return str;
+			}
+			yield return key;
+		}
+		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
+		{
+			IReadOnlyDictionary<string, string> result = await underlying.Execute(AppendToEnd(reads, lockkey), new Dictionary<string, string>(conditions)
+			{
+				{ lockkey, nonce }
+			}, writes);
+
+			IDictionary<string, string> keyValuePairs;
+
+			if(result is IDictionary<string, string> d){
+				keyValuePairs = d;
+			} else{
+				keyValuePairs = new Dictionary<string, string>(result);
+			}
+			if(keyValuePairs.TryGetValue(lockkey, out string actual)){
+				if(actual == nonce){
+					keyValuePairs.Remove(lockkey);
+					return (IReadOnlyDictionary<string, string>)keyValuePairs;
+				}
+				throw new LockStolenException();
+			} else{
+				throw new Exception("Database does not return lock key (should not reach here)");
+			}
+			
+		}
+	}
+	public sealed class LockStolenException : Exception{
+		public LockStolenException() : base("The lock has been stolen by another thread"){
+			
+		}
+	}
 }

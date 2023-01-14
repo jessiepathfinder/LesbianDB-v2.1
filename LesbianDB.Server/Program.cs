@@ -20,13 +20,13 @@ namespace LesbianDB.Server
 		{
 			[Option("listen", Required = true, HelpText = "The HTTP websocket prefix to listen to (e.g https://lesbiandb-eu.scalegrid.com/c160d449395b5fbe70fcd18cef59264b/)")]
 			public string Listen { get; set; }
-			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd)")]
+			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd/kellyanne)")]
 			public string Engine { get; set; }
 			[Option("purrfectodd.flushinginterval", Required = false, HelpText = "Tells PurrfectODD to flush all writes to disk every N microseconds", Default = 30000)]
 			public int PurrfectODDFlushingInterval { get; set; }
-			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd, optional for saskia, have no effect for yuri)")]
+			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd, optional for saskia, have no effect for yuri/kellyanne)")]
 			public string PersistDir { get; set; }
-			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability.")]
+			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability (no effect for kellyanne storage engine).")]
 			public string Binlog{ get; set; }
 			[Option("soft-memory-limit", Required = false, HelpText = "The soft limit to memory usage (in bytes)", Default = 268435456)]
 			public long SoftMemoryLimit { get; set; }
@@ -49,6 +49,11 @@ namespace LesbianDB.Server
 			public bool ClearBinlog { get; set; }
 			[Option("no-read-cache", Required = false, HelpText = "Disables the read cache (useful for databases accessed solely via the Optimistic Functions Framework, recognized by Saskia/PurrfectODD storage engines)", Default = false)]
 			public bool NoReadCache { get; set; }
+			[Option("transient-storage-shards", Required = false, HelpText = "A file containing the list of transient storage shards for use with the Kellyanne sharded database engine.", Default = null)]
+			public string TransientStorageShards { get; set; }
+			[Option("redo-log-shards", Required = false, HelpText = "A file containing the list of redo log shards for use with the Kellyanne sharded database engine.", Default = null)]
+			public string RedoLogShards { get; set; }
+
 		}
 		private static readonly ArrayPool<byte> arrayPool = ArrayPool<byte>.Create();
 		private static ISwapAllocator CreateYuriMalloc(Options options, string comptype)
@@ -126,14 +131,19 @@ namespace LesbianDB.Server
 			IDatabaseEngine databaseEngine;
 			Action closeLevelDB;
 			Stream binlog;
-			{
+			if(engine == "kellyanne"){
+				binlog = null;
+			} else{
 				string binlogname = options.Binlog;
-				if(binlogname is null){
+				if (binlogname is null)
+				{
 					binlog = null;
-				} else{
+				}
+				else
+				{
 					Console.WriteLine("Opening binlog...");
 					binlog = new FileStream(binlogname, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.SequentialScan | FileOptions.Asynchronous);
-				}				
+				}
 			}
 			Console.WriteLine("Creating storage engine...");
 			Task load;
@@ -284,6 +294,36 @@ namespace LesbianDB.Server
 					closeLevelDB = null;
 					lockfile = null;
 					finalFlush = null;
+					break;
+				case "kellyanne":
+					string[] urls = File.ReadAllLines(options.RedoLogShards);
+					int len2 = urls.Length;
+					if(len2 == 0){
+						throw new Exception("Minimum 1 redo log shard required");
+					}
+					IDatabaseEngine[] redoLogShards = new IDatabaseEngine[len2];
+					for(int i = 0; i < len2; ++i){
+						redoLogShards[i] = new RemoteDatabaseEngine(new Uri(urls[i]));
+					}
+					urls = File.ReadAllLines(options.TransientStorageShards);
+					len2 = urls.Length;
+					if (len2 == 0)
+					{
+						throw new Exception("Minimum 1 transient storage shard required");
+					}
+					Task[] locktasks = new Task[len2];
+					IDatabaseEngine[] ephemeralStorageShards = new IDatabaseEngine[len2];
+					for (int i = 0; i < len2; ++i)
+					{
+						ephemeralStorageShards[i] = new SessionLockingDatabaseEngine(new RemoteDatabaseEngine(new Uri(urls[i])), "LesbianDB_reserved_Kellyanne_lock", out locktasks[i]);
+					}
+					load = Task.WhenAll(locktasks);
+					asyncDictionary = null;
+					getDatabaseEngine = null;
+					closeLevelDB = null;
+					lockfile = null;
+					finalFlush = null;
+					databaseEngine = new Kellyanne(redoLogShards, ephemeralStorageShards);
 					break;
 				default:
 					throw new Exception("Unknown storage engine: " + engine);
