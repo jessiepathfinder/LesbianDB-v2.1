@@ -11,7 +11,7 @@ namespace LesbianDB.IntelliEX
 {
 	public sealed class IntelligentExecutionManager : IOptimisticExecutionManager
 	{
-		private static readonly IReadOnlyDictionary<string, string> emptyDictionary = new Dictionary<string, string>();
+		private static readonly IReadOnlyDictionary<string, string> emptyDictionary = SafeEmptyReadOnlyDictionary<string, string>.instance;
 		private readonly IDatabaseEngine databaseEngine1;
 		private readonly string counterName;
 		private readonly string[] counterNameArr;

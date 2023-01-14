@@ -13,9 +13,74 @@ using System.Collections.Generic;
 using Newtonsoft.Json;
 using LesbianDB.Optimism.Core;
 using System.Numerics;
+using System.Diagnostics.CodeAnalysis;
+using System.Collections;
 
 namespace LesbianDB
 {
+	public sealed class SafeEmptyReadOnlyDictionary<K, V> : IReadOnlyDictionary<K, V>
+	{
+		public static readonly SafeEmptyReadOnlyDictionary<K, V> instance = new SafeEmptyReadOnlyDictionary<K, V>();
+		private SafeEmptyReadOnlyDictionary(){
+			
+		}
+		private static readonly K[] emptyKeys = new K[0];
+		private static readonly V[] emptyValues = new V[0];
+		private static readonly KeyValuePair<K, V>[] emptyKeyValuePairs = new KeyValuePair<K, V>[0];
+		private sealed class EmptyEnumerator<T> : IEnumerator<T>
+		{
+			private EmptyEnumerator(){
+				
+			}
+			public static readonly EmptyEnumerator<T> instance = new EmptyEnumerator<T>();
+			public T Current => default;
+
+			object IEnumerator.Current => null;
+
+			public void Dispose()
+			{
+				
+			}
+
+			public bool MoveNext()
+			{
+				return false;
+			}
+
+			public void Reset()
+			{
+				
+			}
+		}
+		public V this[K key] => throw new NotImplementedException();
+
+		public IEnumerable<K> Keys => emptyKeys;
+
+		public IEnumerable<V> Values => emptyValues;
+
+		public int Count => 0;
+
+		public bool ContainsKey(K key)
+		{
+			return false;
+		}
+
+		public IEnumerator<KeyValuePair<K, V>> GetEnumerator()
+		{
+			return EmptyEnumerator<KeyValuePair<K, V>>.instance;
+		}
+
+		public bool TryGetValue(K key, [MaybeNullWhen(false)] out V value)
+		{
+			value = default;
+			return false;
+		}
+
+		IEnumerator IEnumerable.GetEnumerator()
+		{
+			return EmptyEnumerator<object>.instance;
+		}
+	}
 	public static class DefaultResult<T>{
 		public static readonly Task<T> instance = Task.FromResult<T>(default);
 	}
@@ -167,6 +232,13 @@ namespace LesbianDB
 			if(e is { }){
 				throw new ObjectDamagedException(e);
 			}
+		}
+		public static ulong HashString4(string str){
+			Span<ulong> span = stackalloc ulong[2];
+			using(MD5 md5 = MD5.Create()){
+				md5.TryComputeHash(MemoryMarshal.AsBytes(str.AsSpan()), MemoryMarshal.AsBytes(span), out _);
+			}
+			return span[0] ^ span[1];
 		}
 		public static async Task AtomicFileRewrite(string filename, ReadOnlyMemory<byte> newContent)
 		{

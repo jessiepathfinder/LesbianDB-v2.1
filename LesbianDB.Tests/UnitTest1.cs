@@ -309,6 +309,18 @@ namespace LesbianDB.Tests
 
 		//========== LesbianDB ==========
 		[Test]
+		public async Task KellyanneShardedOptimisticCounter()
+		{
+			YuriDatabaseEngine[] yuriDatabaseEngines = new YuriDatabaseEngine[] { new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()) };
+
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new Kellyanne(yuriDatabaseEngines, yuriDatabaseEngines), 0);
+
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+		}
+		[Test]
 		public async Task SpeculativeExecution(){
 			SpeculativeExecutionManager<int> speculativeExecutionManager = new SpeculativeExecutionManager<int>(SpeculativeIncrement, new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0), long.MaxValue);
 			

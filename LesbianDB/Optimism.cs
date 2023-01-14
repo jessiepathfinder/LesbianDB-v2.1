@@ -62,7 +62,7 @@ namespace LesbianDB.Optimism.Core
 		{
 			return optimisticCachePartitions[("Lesbians are optimistic " + key).GetHashCode() & 255];
 		}
-		private static readonly Dictionary<string, string> emptyDictionary = new Dictionary<string, string>();
+		private static readonly IReadOnlyDictionary<string, string> emptyDictionary = SafeEmptyReadOnlyDictionary<string, string>.instance;
 
 		/// <summary>
 		/// Help maintain the integrity of the optimistic execution scope while still performing optimistic optimizations
@@ -307,7 +307,7 @@ namespace LesbianDB.Optimism.Core
 					writes.Add(key, value);
 				}
 			} else{
-				writes = emptyDictionary;
+				writes = new Dictionary<string, string>();
 			}
 
 			IReadOnlyDictionary<string, string> updated = await databaseEngine.Execute(reads.Keys, writes.Count == 0 ? emptyDictionary : reads, writes);
