@@ -309,6 +309,37 @@ namespace LesbianDB.Tests
 
 		//========== LesbianDB ==========
 		[Test]
+		public async Task KellyanneMultiMasterReplication()
+		{
+			static YuriDatabaseEngine[] Create(){
+				return new YuriDatabaseEngine[] { new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()) };
+			}
+			YuriDatabaseEngine[] redoLog = Create();
+
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new Kellyanne[] { new Kellyanne(redoLog, Create()), new Kellyanne(redoLog, Create()) }, 0);
+
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+		}
+		[Test]
+		public async Task MultithreadedMultiMasterReplication()
+		{
+			static YuriDatabaseEngine Create()
+			{
+				return new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary());
+			}
+			YuriDatabaseEngine[] redoLog = new YuriDatabaseEngine[] { Create(), Create() };
+
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new ReplicatedDatabaseEngine[] { new ReplicatedDatabaseEngine(redoLog, Create()), new ReplicatedDatabaseEngine(redoLog, Create()) }, 0);
+
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+		}
+		[Test]
 		public async Task KellyanneShardedOptimisticCounter()
 		{
 			YuriDatabaseEngine[] yuriDatabaseEngines = new YuriDatabaseEngine[] { new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()) };

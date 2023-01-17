@@ -35,7 +35,7 @@ namespace LesbianDB.Optimism.Core
 	}
 	public sealed class OptimisticExecutionManager : IOptimisticExecutionManager
 	{
-		private readonly IDatabaseEngine databaseEngine;
+		private readonly IDatabaseEngine[] databaseEngines;
 
 		private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions = new ConcurrentDictionary<string, string>[256];
 		private static async void Collect(WeakReference<ConcurrentDictionary<string, string>[]> weakReference, long softMemoryLimit){
@@ -50,10 +50,18 @@ namespace LesbianDB.Optimism.Core
 				goto start;
 			}
 		}
-		public OptimisticExecutionManager(IDatabaseEngine databaseEngine, long softMemoryLimit)
+		public OptimisticExecutionManager(IDatabaseEngine[] databaseEngines, long softMemoryLimit)
 		{
-			this.databaseEngine = databaseEngine ?? throw new ArgumentNullException(nameof(databaseEngine));
-			for(int i = 0; i < 256; ){
+			this.databaseEngines = databaseEngines ?? throw new ArgumentNullException(nameof(databaseEngines));
+			for (int i = 0; i < 256; ){
+				optimisticCachePartitions[i++] = new ConcurrentDictionary<string, string>();
+			}
+			Collect(new WeakReference<ConcurrentDictionary<string, string>[]>(optimisticCachePartitions, false), softMemoryLimit);
+		}
+		public OptimisticExecutionManager(IDatabaseEngine databaseEngine, long softMemoryLimit) {
+			databaseEngines = new IDatabaseEngine[]{databaseEngine ?? throw new ArgumentNullException(nameof(databaseEngine))};
+			for (int i = 0; i < 256;)
+			{
 				optimisticCachePartitions[i++] = new ConcurrentDictionary<string, string>();
 			}
 			Collect(new WeakReference<ConcurrentDictionary<string, string>[]>(optimisticCachePartitions, false), softMemoryLimit);
@@ -133,15 +141,15 @@ namespace LesbianDB.Optimism.Core
 		private sealed class OptimisticExecutionScope : IOptimisticExecutionScope
 		{
 			private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions;
-			private readonly IDatabaseEngine databaseEngine;
+			private readonly IDatabaseEngine[] databaseEngines;
 			public readonly ConcurrentDictionary<string, string> L1ReadCache = new ConcurrentDictionary<string, string>();
 			public readonly ConcurrentDictionary<string, string> L1WriteCache = new ConcurrentDictionary<string, string>();
 			public readonly ConcurrentDictionary<string, bool> cacheableVolatileReads = new ConcurrentDictionary<string, bool>();
 
-			public OptimisticExecutionScope(ConcurrentDictionary<string, string>[] optimisticCachePartitions, IDatabaseEngine databaseEngine)
+			public OptimisticExecutionScope(ConcurrentDictionary<string, string>[] optimisticCachePartitions, IDatabaseEngine[] databaseEngines)
 			{
 				this.optimisticCachePartitions = optimisticCachePartitions;
-				this.databaseEngine = databaseEngine;
+				this.databaseEngines = databaseEngines;
 			}
 
 			private ConcurrentDictionary<string, string> GetOptimisticCachePartition(string key)
@@ -161,7 +169,7 @@ namespace LesbianDB.Optimism.Core
 				}
 				return keyValuePairs1;
 			pessimistic:
-				IReadOnlyDictionary<string, string> read = await databaseEngine.Execute(keys, emptyDictionary, emptyDictionary);
+				IReadOnlyDictionary<string, string> read = await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(keys, emptyDictionary, emptyDictionary);
 				foreach(KeyValuePair<string, string> keyValuePair in read){
 					string value = keyValuePair.Value;
 					if(L1ReadCache.GetOrAdd(keyValuePair.Key, value) != value){
@@ -214,7 +222,7 @@ namespace LesbianDB.Optimism.Core
 				ConcurrentDictionary<string, string> optimisticCachePartition = GetOptimisticCachePartition(key);
 				if (!optimisticCachePartition.TryGetValue(key, out string value))
 				{
-					value = optimisticCachePartition.GetOrAdd(key, (await databaseEngine.Execute(new string[] { key }, emptyDictionary, emptyDictionary))[key]);
+					value = optimisticCachePartition.GetOrAdd(key, (await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(new string[] { key }, emptyDictionary, emptyDictionary))[key]);
 				}
 				value = L1ReadCache.GetOrAdd(key, value);
 
@@ -243,7 +251,7 @@ namespace LesbianDB.Optimism.Core
 			}
 		}
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction){
-			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngine);
+			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngines);
 		start:
 			T ret;
 			Exception exception = null;
@@ -254,7 +262,7 @@ namespace LesbianDB.Optimism.Core
 			} catch(Exception e){
 				if(e is OptimisticFault){
 					if(optimisticExecutionScope.L1ReadCache.Count > 0){
-						foreach (KeyValuePair<string, string> keyValuePair in await databaseEngine.Execute(GetKeys(optimisticExecutionScope.L1ReadCache.ToArray()), emptyDictionary, emptyDictionary))
+						foreach (KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(GetKeys(optimisticExecutionScope.L1ReadCache.ToArray()), emptyDictionary, emptyDictionary))
 						{
 							string key = keyValuePair.Key;
 							optimisticExecutionScope.cacheableVolatileReads.TryAdd(key, false);
@@ -310,7 +318,7 @@ namespace LesbianDB.Optimism.Core
 				writes = new Dictionary<string, string>();
 			}
 
-			IReadOnlyDictionary<string, string> updated = await databaseEngine.Execute(reads.Keys, writes.Count == 0 ? emptyDictionary : reads, writes);
+			IReadOnlyDictionary<string, string> updated = await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(reads.Keys, writes.Count == 0 ? emptyDictionary : reads, writes);
 			bool success = true;
 			foreach(KeyValuePair<string, string> kvp in updated){
 				string key = kvp.Key;

@@ -12,13 +12,19 @@ namespace LesbianDB.IntelliEX
 	public sealed class IntelligentExecutionManager : IOptimisticExecutionManager
 	{
 		private static readonly IReadOnlyDictionary<string, string> emptyDictionary = SafeEmptyReadOnlyDictionary<string, string>.instance;
-		private readonly IDatabaseEngine databaseEngine1;
+		private readonly IDatabaseEngine[] databaseEngines;
 		private readonly string counterName;
 		private readonly string[] counterNameArr;
 
+		public IntelligentExecutionManager(IDatabaseEngine[] databaseEngines, string counterName)
+		{
+			this.databaseEngines = databaseEngines ?? throw new ArgumentNullException(nameof(databaseEngines));
+			this.counterName = counterName ?? throw new ArgumentNullException(nameof(counterName));
+			counterNameArr = new string[] { counterName };
+		}
 		public IntelligentExecutionManager(IDatabaseEngine databaseEngine1, string counterName)
 		{
-			this.databaseEngine1 = databaseEngine1 ?? throw new ArgumentNullException(nameof(databaseEngine1));
+			databaseEngines = new IDatabaseEngine[]{databaseEngine1 ?? throw new ArgumentNullException(nameof(databaseEngine1))};
 			this.counterName = counterName ?? throw new ArgumentNullException(nameof(counterName));
 			counterNameArr = new string[] { counterName };
 		}
@@ -51,7 +57,7 @@ namespace LesbianDB.IntelliEX
 				}
 				value = (await databaseEngine.Execute(new string[] { key }, emptyDictionary, emptyDictionary))[key];
 				if(value is { }){
-					if (ParseWhatever(value, out _) > id)
+					if (ParseWhatever(value) > id)
 					{
 						throw new OptimisticFault(); //Revert the transaction since the database became inconsistent
 					}
@@ -71,8 +77,8 @@ namespace LesbianDB.IntelliEX
 				}
 				return split > 0 ? value[(split + 1)..] : null;
 			}
-			private static BigInteger ParseWhatever(string str, out int val){
-				val = str.IndexOf('_');
+			private static BigInteger ParseWhatever(string str){
+				int val = str.IndexOf('_');
 				if(val > 0){
 					return BigInteger.Parse(str.AsSpan(0, val), NumberStyles.None);
 				} else{
@@ -108,7 +114,7 @@ namespace LesbianDB.IntelliEX
 						string key = keyValuePair.Key;
 						string value = keyValuePair.Value;
 						if(value is { }){
-							if (ParseWhatever(value, out int split) > id)
+							if (ParseWhatever(value) > id)
 							{
 								throw new OptimisticFault();
 							}
@@ -147,7 +153,8 @@ namespace LesbianDB.IntelliEX
 		}
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction)
 		{
-			string read = (await databaseEngine1.Execute(counterNameArr, emptyDictionary, emptyDictionary))[counterName];
+			IDatabaseEngine selected = databaseEngines[Misc.FastRandom(0, databaseEngines.Length)];
+			string read = (await selected.Execute(counterNameArr, emptyDictionary, emptyDictionary))[counterName];
 			BigInteger id;
 			while (true){
 				if(read is null){
@@ -155,7 +162,7 @@ namespace LesbianDB.IntelliEX
 				} else{
 					id = BigInteger.Parse(read, NumberStyles.None);
 				}
-				string read1 = (await databaseEngine1.Execute(counterNameArr, new Dictionary<string, string>() {
+				string read1 = (await selected.Execute(counterNameArr, new Dictionary<string, string>() {
 				{counterName, read}},
 				new Dictionary<string, string>(){
 					{counterName, (id + one).ToString()}
@@ -174,7 +181,7 @@ namespace LesbianDB.IntelliEX
 			}
 			IReadOnlyDictionary<string, string> repopulate = null;
 		start:
-			IntelligentOptimisticExecutionScope scope = new IntelligentOptimisticExecutionScope(databaseEngine1, id);
+			IntelligentOptimisticExecutionScope scope = new IntelligentOptimisticExecutionScope(selected, id);
 			if (repopulate is { })
 			{
 				foreach (KeyValuePair<string, string> keyValuePair in repopulate)
@@ -189,7 +196,7 @@ namespace LesbianDB.IntelliEX
 			}
 			catch (OptimisticFault)
 			{
-				repopulate = await databaseEngine1.Execute(GetKeys(scope.reads.ToArray()), emptyDictionary, emptyDictionary);
+				repopulate = await selected.Execute(GetKeys(scope.reads.ToArray()), emptyDictionary, emptyDictionary);
 				goto start;
 			}
 			KeyValuePair<string, string>[] keyValuePair2 = scope.writes.ToArray();
@@ -203,7 +210,7 @@ namespace LesbianDB.IntelliEX
 			}
 			Dictionary<string, string> reads = new Dictionary<string, string>(scope.reads.ToArray());
 			
-			repopulate = await databaseEngine1.Execute(reads.Keys, reads, writes);
+			repopulate = await selected.Execute(reads.Keys, reads, writes);
 			foreach (KeyValuePair<string, string> keyValuePair1 in repopulate)
 			{
 				if (reads[keyValuePair1.Key] == keyValuePair1.Value)
