@@ -31,13 +31,13 @@ namespace LesbianDB.Server
 			[Option("soft-memory-limit", Required = false, HelpText = "The soft limit to memory usage (in bytes)", Default = 268435456)]
 			public long SoftMemoryLimit { get; set; }
 
-			[Option("yurimalloc.buckets", Required = false, HelpText = "The number of YuriMalloc generation 1 buckets to create (only useful for yuri storage engine, or saskia storage engine without --persist-dir set).", Default = 65536)]
+			[Option("yurimalloc.buckets", Required = false, HelpText = "The number of YuriMalloc generation 1 buckets to create (only useful for yuri storage engine, or saskia storage engine without --persist-dir set).", Default = 256)]
 			public int YuriMallocBuckets { get; set; }
 			[Option("yurimalloc.gen2buckets", Required = false, HelpText = "The number of YuriMalloc generation 2 buckets to create (only useful for yuri storage engine, or saskia storage engine without --persist-dir set, zero means YuriMalloc generation 2 disabled).", Default = 0)]
 			public int YuriMallocGen2Buckets { get; set; }
 			[Option("yurimalloc.gen2promotiondelay", Required = false, HelpText = "The number of seconds to defer promotion of YuriMalloc data from generation 1 to generation 2 (only useful for yuri storage engine, or saskia storage engine without --persist-dir set, and YuriMalloc generation 2 is enabled).", Default = 256)]
 			public int YuriMallocGen2PromotionDelay { get; set; }
-			[Option("yuri.buckets", Required = false, HelpText = "The number of buckets to create (only used with Yuri storage engine).", Default = 256)]
+			[Option("yuri.buckets", Required = false, HelpText = "The number of buckets to create (only used with Yuri storage engine).", Default = 65536)]
 			public int YuriBuckets { get; set; }
 			[Option("accelerated-swap-compression", Required = false, HelpText = "How should we use GPU-accelerated swap compression? disable: do not use GPU-accelerated YuriMalloc swap compression, zram: use GPU-accelerated memory compression as a replacement for swapping, zcache: hot data is stored in RAM uncompressed, warm data is stored in RAM compressed, and cold data is swapped to disk compressed. This feature requires NVIDIA CUDA compartiable GPUs.", Default = "disable")]
 			public string NVSwapCompression { get; set; }
