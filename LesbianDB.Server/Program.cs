@@ -97,11 +97,11 @@ namespace LesbianDB.Server
 		private static volatile Action exit;
 		private static void Main(string[] args)
 		{
-			Console.WriteLine("LesbianDB v2.1 server\nMade by Jessie Lesbian (Discord: jessielesbian#8060)\n\nParsing arguments...");
+			Console.WriteLine("LesbianDB v2.1 server\nMade by Jessie Lesbian (Discord: jessielesbian#8060)\n");
 
 			Console.WriteLine("Registering unobserved task exception handler...");
 			TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
-
+			Console.WriteLine("Parsing arguments...");
 			Options options = Parser.Default.ParseArguments<Options>(args).Value;
 			
 			if (options is null){

@@ -133,6 +133,7 @@ namespace LesbianDB
 		private readonly AsyncReaderWriterLock[] asyncReaderWriterLocks = new AsyncReaderWriterLock[65536];
 		private readonly ConcurrentQueue<Exception> damages = new ConcurrentQueue<Exception>();
 		private readonly AsyncReaderWriterLock damageCheckingLock = new AsyncReaderWriterLock();
+		private Exception binlogException;
 		private async Task WriteAndFlushBinlog(byte[] buffer, int len){
 			await binlog.WriteAsync(buffer, 0, len);
 			await binlog.FlushAsync();
@@ -140,7 +141,8 @@ namespace LesbianDB
 		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
 		{
 			byte minDamagesHeight = 0;
-			
+			byte[] binlog_buffer;
+			int binlog_writelen;
 			//Lock checking
 			Dictionary<ushort, bool> lockLevels = new Dictionary<ushort, bool>();
 			bool write = writes.Count > 0;
@@ -148,6 +150,8 @@ namespace LesbianDB
 				if(writefastrecover){
 					if(writes.ContainsKey("LesbianDB_reserved_binlog_height")){
 						write = false;
+						binlog_buffer = null;
+						binlog_writelen = 0;
 						goto nowrite;
 					}
 				}
@@ -155,7 +159,34 @@ namespace LesbianDB
 				{
 					lockLevels.TryAdd((ushort)(keyValuePair.Key.GetHashCode() & 65535), true);
 				}
+				if (binlog is null)
+				{
+					binlog_buffer = null;
+					binlog_writelen = 0;
+				}
+				else
+				{
+					JsonSerializer jsonSerializer = new JsonSerializer();
+					using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
+					{
+						memoryStream.SetLength(4);
+						memoryStream.Seek(4, SeekOrigin.Begin);
+						using (Stream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true))
+						{
+							BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
+							jsonSerializer.Serialize(bsonDataWriter, writes);
+						}
+						binlog_writelen = (int)memoryStream.Position;
+						binlog_buffer = memoryStream.GetBuffer();
+					}
+					BinaryPrimitives.WriteInt32BigEndian(binlog_buffer.AsSpan(0, 4), binlog_writelen);
+				}
+			} else{
+				binlog_buffer = null;
+				binlog_writelen = 0;
 			}
+
+
 		nowrite:
 			foreach (string str in reads)
 			{
@@ -172,10 +203,6 @@ namespace LesbianDB
 			//Pending reads
 			Dictionary<string, Task<string>> pendingReads = new Dictionary<string, Task<string>>();
 			Dictionary<string, string> readResults = new Dictionary<string, string>();
-
-			//binlog stuff
-			Task writeBinlog = null;
-			bool binlocked = false;
 
 			//Acquire locks
 			foreach (ushort id in locks)
@@ -224,41 +251,34 @@ namespace LesbianDB
 				{
 					return readResults;
 				}
-				long logheight = 0;
+				
 				Queue<Task> writeTasks = new Queue<Task>();
 				if (binlog is { })
 				{
-					int len;
-					JsonSerializer jsonSerializer = new JsonSerializer();
-					byte[] buffer;
-					using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
-					{
-						memoryStream.SetLength(4);
-						memoryStream.Seek(4, SeekOrigin.Begin);
-						using (Stream deflateStream = new DeflateStream(memoryStream, CompressionLevel.Optimal, true))
-						{
-							BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
-							jsonSerializer.Serialize(bsonDataWriter, writes);
-						}
-						len = (int)memoryStream.Position;
-						buffer = memoryStream.GetBuffer();
-					}
-					BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
-					binlocked = true;
 					await binlogLock.Enter();
-					if (writefastrecover)
-					{
-						logheight = binlog.Position;
+					try{
+						if(binlogException is { }){
+							throw new ObjectDamagedException(binlogException);
+						}
+						try
+						{
+							await WriteAndFlushBinlog(binlog_buffer, binlog_writelen + 4);
+							writeTasks.Enqueue(asyncDictionary.Write("LesbianDB_reserved_binlog_height", binlog.Position.ToString()));
+						}
+						catch (Exception e)
+						{
+							binlogException = e;
+							throw;
+						}
 					}
-					writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
+					finally
+					{
+						binlogLock.Exit();
+					}
 				}
 				await flushLock.AcquireReaderLock();
 				try
 				{
-					if (logheight > 0)
-					{
-						writeTasks.Enqueue(asyncDictionary.Write("LesbianDB_reserved_binlog_height", logheight.ToString()));
-					}
 					foreach (KeyValuePair<string, string> keyValuePair in writes)
 					{
 						writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
@@ -281,21 +301,6 @@ namespace LesbianDB
 			finally
 			{
 				try{
-					if (binlocked)
-					{
-						try
-						{
-							//Binlog writing will always start after binlog locking
-							if (writeBinlog is { })
-							{
-								await writeBinlog;
-							}
-						}
-						finally
-						{
-							binlogLock.Exit();
-						}
-					}
 					foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 					{
 						if (keyValuePair.Value)

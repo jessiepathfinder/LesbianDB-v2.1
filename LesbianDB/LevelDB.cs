@@ -179,6 +179,7 @@ namespace LesbianDB
 			await UltraHeavyThreadPoolAwaitable.instance;
 			return database.Get(key, readOptions);
 		}
+		private Exception binlogException;
 		public async Task<IReadOnlyDictionary<string, string>> Execute(IEnumerable<string> reads, IReadOnlyDictionary<string, string> conditions, IReadOnlyDictionary<string, string> writes)
 		{
 
@@ -204,6 +205,28 @@ namespace LesbianDB
 					}
 				}
 			}
+			byte[] binlog_buffer;
+			int binlog_writelen;
+			if (dowrite && binlog is { }){
+				JsonSerializer jsonSerializer = new JsonSerializer();
+				using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
+				{
+					memoryStream.SetLength(4);
+					memoryStream.Seek(0, SeekOrigin.End);
+					using (Stream deflateStream = new DeflateStream(memoryStream, System.IO.Compression.CompressionLevel.Optimal, true))
+					{
+						BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
+						jsonSerializer.Serialize(bsonDataWriter, writes);
+					}
+					binlog_writelen = (int)memoryStream.Position;
+					memoryStream.Seek(0, SeekOrigin.Begin);
+					binlog_buffer = memoryStream.GetBuffer();
+				}
+				BinaryPrimitives.WriteInt32BigEndian(binlog_buffer.AsSpan(0, 4), binlog_writelen);
+			} else{
+				binlog_buffer = null;
+				binlog_writelen = 0;
+			}
 			foreach (string read in allReads.Keys)
 			{
 				lockLevels.TryAdd((ushort)(read.GetHashCode() & 65535), false);
@@ -212,8 +235,6 @@ namespace LesbianDB
 			locks.Sort();
 			Dictionary<string, string> returns = new Dictionary<string, string>();
 			Dictionary<string, Task<string>> keyValuePairs = new Dictionary<string, Task<string>>();
-			bool binlocked = false;
-			Task writeBinlog = null;
 			foreach (ushort id in locks)
 			{
 				if (lockLevels[id])
@@ -244,46 +265,39 @@ namespace LesbianDB
 				}
 				writes = Misc.ScrubNoEffectWrites(writes, keyValuePairs);
 				WriteOptions writeOptions;
-				long binpos;
-				if (binlog is { })
-				{
-					int len;
-					byte[] buffer;
-					JsonSerializer jsonSerializer = new JsonSerializer();
-					using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
-					{
-						memoryStream.SetLength(4);
-						memoryStream.Seek(0, SeekOrigin.End);
-						using (Stream deflateStream = new DeflateStream(memoryStream, System.IO.Compression.CompressionLevel.Optimal, true))
-						{
-							BsonDataWriter bsonDataWriter = new BsonDataWriter(deflateStream);
-							jsonSerializer.Serialize(bsonDataWriter, writes);
-						}
-						len = (int)memoryStream.Position;
-						memoryStream.Seek(0, SeekOrigin.Begin);
-						buffer = memoryStream.GetBuffer();
-					}
-					BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
-					binlocked = true;
-					await binlogLocker.Enter();
-					binpos = binlog.Position;
-					writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
-					writeOptions = asyncWriteOptions;
-				} else{
-					writeOptions = syncWriteOptions;
-					binpos = 0;
-				}
 				using WriteBatch writeBatch = new WriteBatch(Encoding.UTF8);
-				foreach(KeyValuePair<string, string> kvp in writes){
+				if (binlog is null)
+				{
+					writeOptions = syncWriteOptions;
+				}
+				else
+				{
+					writeOptions = asyncWriteOptions;
+					await binlogLocker.Enter();
+					try{
+						if(binlogException is { }){
+							throw new ObjectDamagedException(binlogException);
+						}
+						try
+						{
+							await WriteAndFlushBinlog(binlog_buffer, binlog_writelen + 4);
+						}
+						catch (Exception e)
+						{
+							binlogException = e;
+							throw;
+						}
+					} finally{
+						binlogLocker.Exit();
+					}
+				}
+				foreach (KeyValuePair<string, string> kvp in writes){
 					string value = kvp.Value;
 					if(value is null){
 						writeBatch.Delete(kvp.Key);
 					} else{
 						writeBatch.Put(kvp.Key, value);
 					}
-				}
-				if(writeBinlog is { }){
-					writeBatch.Put("LesbianDB_reserved_binlog_height", binpos.ToString());
 				}
 				try{
 					await UltraHeavyThreadPoolAwaitable.instance;
@@ -296,21 +310,6 @@ namespace LesbianDB
 
 
 			} finally{
-				if (binlocked)
-				{
-					try
-					{
-						//Binlog writing will always start after binlog locking
-						if (writeBinlog is { })
-						{
-							await writeBinlog;
-						}
-					}
-					finally
-					{
-						binlogLocker.Exit();
-					}
-				}
 				foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 				{
 					if (keyValuePair.Value)
