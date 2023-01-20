@@ -207,7 +207,7 @@ namespace LesbianDB
 			}
 			byte[] binlog_buffer;
 			int binlog_writelen;
-			if (dowrite && binlog is { }){
+			if (dowrite & binlog is { }){
 				JsonSerializer jsonSerializer = new JsonSerializer();
 				using (PooledMemoryStream memoryStream = new PooledMemoryStream(Misc.arrayPool))
 				{

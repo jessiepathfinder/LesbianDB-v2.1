@@ -189,7 +189,7 @@ namespace LesbianDB.Optimism.YuriTables
 			string read = await optimisticExecutionScope.Read(arrayname2);
 			if (read is null)
 			{
-				if (length.IsZero && start.IsZero)
+				if (length.IsZero & start.IsZero)
 				{
 					optimisticExecutionScope.ClearArray(arrayname);
 					return;
@@ -262,6 +262,9 @@ namespace LesbianDB.Optimism.YuriTables
 				_ => throw new InvalidOperationException(),
 			};
 		}
+		public static Task<BigInteger> HashSize(this IOptimisticExecutionScope optimisticExecutionScope, string hashname){
+			return optimisticExecutionScope.ArrayGetLength(hashname + "_keys");
+		}
 		public static async Task HashSet(this IOptimisticExecutionScope optimisticExecutionScope, string hashname, string key, string value){
 			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
 			StringBuilder stringBuilder = new StringBuilder(hashname).Append("_keys");
@@ -326,7 +329,71 @@ namespace LesbianDB.Optimism.YuriTables
 				yield return new NewKeyValuePair<string, string>(key, await optimisticExecutionScope.HashGet(hashname, key));
 			}
 		}
+		public static async Task<bool> BTreeTryRemove(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger){
+			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
+			string strbigint = bigInteger.ToString();
+			JsonBTreeNode jsonBTreeNode = new JsonBTreeNode();
+			Queue<string> queue = new Queue<string>();
+		start:
+			string read = await optimisticExecutionScope.Read(treename);
+			if(read is null){
+				return false;
+			}
+			JsonConvert.PopulateObject(read, jsonBTreeNode);
+			string low = jsonBTreeNode.low;
+			string high = jsonBTreeNode.high;
+			string[] list = jsonBTreeNode.list;
+			bool didit = false;
+			foreach(string str in list){
+				if(didit){
+					queue.Enqueue(str);
+					continue;
+				}
+				if(str == strbigint){
+					didit = true;
+					continue;
+				}
+				queue.Enqueue(str);
+			}
+			if(didit){
+				jsonBTreeNode.list = queue.ToArray();
+				optimisticExecutionScope.Write(treename, JsonConvert.SerializeObject(jsonBTreeNode));
+				return true;
+			}
+			if(queue.TryDequeue(out string highstr)){
+				BigInteger highint = BigInteger.Parse(highstr, NumberStyles.AllowLeadingSign);
+				BigInteger lowint = list.Length == 1 ? highint : BigInteger.Parse(list[0], NumberStyles.AllowLeadingSign);
 
+				if (bigInteger < lowint){
+					if(low is null){
+						return false;
+					}
+					treename = low;
+					queue.Clear();
+					goto start;
+				}
+
+				if(bigInteger > highint){
+					if(high is null){
+						return false;
+					}
+					treename = high;
+					queue.Clear();
+					goto start;
+				}
+				return false;
+			}
+			if(low is { }){
+				if(await optimisticExecutionScope.BTreeTryRemove(low, bigInteger)){
+					return true;
+				}
+			}
+			if(high is null){
+				return false;
+			}
+			treename = high;
+			goto start;
+		}
 		public static async Task<bool> BTreeTryInsert(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger){
 			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
 			string strbigint = bigInteger.ToString();
@@ -356,7 +423,7 @@ namespace LesbianDB.Optimism.YuriTables
 					return false;
 				}
 				BigInteger bigInteger1 = BigInteger.Parse(str, NumberStyles.AllowLeadingSign);
-				if(bigInteger1 > bigInteger && notadded){
+				if(bigInteger1 > bigInteger & notadded){
 					if(notfirst){
 						queue.Enqueue(strbigint);
 						notadded = false;
@@ -371,7 +438,42 @@ namespace LesbianDB.Optimism.YuriTables
 				noloop = false;
 			}
 			if (noloop) {
-				throw new Exception("Unexpected empty b-tree node (should not reach here)");
+				if(low is null ^ high is null){
+					queue.Clear();
+					treename = low is null ? high : low;
+					goto start;
+				}
+				if(low is { }){
+					await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelectAll(low, true))
+					{
+						if(bigInteger1 == bigInteger){
+							return false;
+						}
+						if(bigInteger1 < bigInteger){
+							break;
+						}
+						queue.Clear();
+						treename = low;
+						goto start;
+					}
+					await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelectAll(high, false))
+					{
+						if (bigInteger1 == bigInteger)
+						{
+							return false;
+						}
+						if (bigInteger1 > bigInteger)
+						{
+							break;
+						}
+						queue.Clear();
+						treename = low;
+						goto start;
+					}
+					notadded = false;
+					queue.Enqueue(strbigint);
+				}
+				
 			}
 			if (notadded)
 			{
@@ -389,7 +491,7 @@ namespace LesbianDB.Optimism.YuriTables
 
 			list = queue.ToArray();
 			int len = list.Length;
-			if (read.Length > 256 && len > 0 && (len % 3) == 0){
+			if (read.Length > 256 & len > 0 & (len % 3) == 0){
 				int cut = len / 3;
 				string lowerkey = Random();
 				string upperkey = Random();
@@ -499,6 +601,24 @@ namespace LesbianDB.Optimism.YuriTables
 
 		private static async IAsyncEnumerable<BigInteger> BTreeSelect(this IOptimisticExecutionScope optimisticExecutionScope, string treename, BigInteger bigInteger, string strbigint, JsonBTreeNode jsonBTreeNode, bool smaller, bool reverse)
 		{
+			//fast paths
+			if(smaller ^ reverse){
+				await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelectAll(treename, reverse)){
+					if(smaller ? bigInteger1 < bigInteger : bigInteger1 > bigInteger){
+						yield return bigInteger1;
+						if (bigInteger1 == bigInteger)
+						{
+							yield break; //fast path out of loop
+						}
+					} else{
+						yield break;
+					}
+					
+				}
+				yield break;
+			}
+
+			
 			optimisticExecutionScope = VolatileReadManager.Create(optimisticExecutionScope);
 			string read = await optimisticExecutionScope.Read(treename);
 			if(read is null){
@@ -507,8 +627,32 @@ namespace LesbianDB.Optimism.YuriTables
 			JsonConvert.PopulateObject(read, jsonBTreeNode);
 			string[] list = jsonBTreeNode.list;
 			int len = list.Length;
+
+			//Alternate path for empty node
 			if(len == 0){
-				throw new Exception("Unexpected empty b-tree buckets (should not reach here)");
+				string first1;
+				string last1;
+				if (reverse)
+				{
+					first1 = jsonBTreeNode.high;
+					last1 = jsonBTreeNode.low;
+				}
+				else
+				{
+					first1 = jsonBTreeNode.low;
+					last1 = jsonBTreeNode.high;
+				}
+				if(first1 is { }){
+					await foreach(BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect(first1, bigInteger, strbigint, jsonBTreeNode, smaller, reverse)){
+						yield return bigInteger1;
+					}
+				}
+				if(last1 is { }){
+					await foreach (BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect(last1, bigInteger, strbigint, jsonBTreeNode, smaller, reverse))
+					{
+						yield return bigInteger1;
+					}
+				}
 			}
 			string firstval = list[0];
 			string lastval = list[len - 1];
@@ -516,16 +660,27 @@ namespace LesbianDB.Optimism.YuriTables
 			BigInteger lastint = len == 1 ? firstint : BigInteger.Parse(lastval, NumberStyles.AllowLeadingSign);
 
 			IEnumerable<string> enumerable;
+			string high;
+			string low;
+			if(smaller){
+				high = lastint < bigInteger ? jsonBTreeNode.high : null;
+				low = firstint < bigInteger ? jsonBTreeNode.low : null;
+			} else{
+				high = lastint > bigInteger ? jsonBTreeNode.high : null;
+				low = firstint > bigInteger ? jsonBTreeNode.low : null;
+			}
+
+
 			string first;
 			string last;
 			if(reverse){
 				enumerable = list.Reverse();
-				first = jsonBTreeNode.high;
-				last = jsonBTreeNode.low;
+				first = high;
+				last = low;
 			} else{
 				enumerable = list;
-				first = jsonBTreeNode.low;
-				last = jsonBTreeNode.high;
+				first = low;
+				last = high;
 			}
 			if(first is { }){
 				await foreach(BigInteger bigInteger1 in optimisticExecutionScope.BTreeSelect(first, bigInteger, strbigint, jsonBTreeNode, smaller, reverse)){
@@ -567,13 +722,19 @@ namespace LesbianDB.Optimism.YuriTables
 			Task<string> readtsk = optimisticExecutionScope.Read(temp);
 			int namelen = name.Length + 1;
 			string btreename = stringBuilder.Remove(namelen, temp.Length - namelen).Append("btree").ToString();
+			stringBuilder.Remove(namelen, btreename.Length - namelen);
 			string read = await readtsk;
 			if(read is null){
 				return false;
 			}
-			Task tsk = optimisticExecutionScope.HashSet(stringBuilder.Remove(namelen, btreename.Length - namelen).Append(read).ToString(), key, null);
+			string hashname = stringBuilder.Append(read).ToString();
+			Task tsk = optimisticExecutionScope.HashSet(hashname, key, null);
 			optimisticExecutionScope.Write(temp, null);
+			BigInteger bigInteger = BigInteger.Parse(read, NumberStyles.AllowLeadingSign);
 			await tsk;
+			if((await optimisticExecutionScope.HashSize(hashname)).IsZero){
+				await optimisticExecutionScope.BTreeTryRemove(btreename, bigInteger);
+			}
 			return true;
 		}
 		public static async Task ZSet(this IOptimisticExecutionScope optimisticExecutionScope, string name, string key, string value, BigInteger bigInteger){
@@ -647,7 +808,7 @@ namespace LesbianDB.Optimism.YuriTables
 		}
 		public static async Task<bool> TryCreateTable(this IOptimisticExecutionScope optimisticExecutionScope, IReadOnlyDictionary<string, ColumnType> keyValuePairs, string name){
 			foreach(ColumnType columnType in keyValuePairs.Values){
-				if(columnType == ColumnType.SortedInt || columnType == ColumnType.UniqueString){
+				if(columnType == ColumnType.SortedInt | columnType == ColumnType.UniqueString){
 					goto create;
 				}
 			}

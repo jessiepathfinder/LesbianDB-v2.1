@@ -85,7 +85,7 @@ namespace LesbianDB.Server
 				binlog.Seek(height, SeekOrigin.Begin);
 			}
 			await YuriDatabaseEngine.RestoreBinlog(binlog, asyncDictionary);
-			if(height > 0 && clearBinlog){
+			if(height > 0 & clearBinlog){
 				await asyncDictionary.Write("LesbianDB_reserved_binlog_height", null);
 				if(asyncDictionary is IFlushableAsyncDictionary flushableAsyncDictionary){
 					await flushableAsyncDictionary.Flush();

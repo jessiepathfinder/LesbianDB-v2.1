@@ -255,7 +255,7 @@ namespace LesbianDB
 			} else{
 				size = compressedSize;
 			}
-			if(compressed && freeingQueue is null){
+			if(compressed & freeingQueue is null){
 				//fast path
 				return () => decompress(buffer.AsMemory());
 			}

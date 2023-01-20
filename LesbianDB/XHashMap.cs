@@ -37,7 +37,7 @@ namespace LesbianDB
 				return false;
 			}
 			if(obj is Hash256 hash256){
-				return hash256.first == first && hash256.second == second && hash256.third == third && hash256.fourth == fourth;
+				return hash256.first == first & hash256.second == second & hash256.third == third & hash256.fourth == fourth;
 			}
 			return false;
 		}
