@@ -180,7 +180,6 @@ namespace LesbianDB.Optimism.Core
 				IDictionary<string, string> keyValuePairs = read as IDictionary<string, string> ?? new Dictionary<string, string>();
 				if(ReferenceEquals(keyValuePairs, read)){
 					foreach(string key in keys){
-						cacheableVolatileReads.TryAdd(key, false);
 						if(L1WriteCache.TryGetValue(key, out string value)){
 							keyValuePairs[key] = value;
 						}
@@ -188,7 +187,6 @@ namespace LesbianDB.Optimism.Core
 				} else{
 					foreach (string key in read.Keys)
 					{
-						cacheableVolatileReads.TryAdd(key, false);
 						if (L1WriteCache.TryGetValue(key, out string value))
 						{
 							keyValuePairs.Add(key, value);
