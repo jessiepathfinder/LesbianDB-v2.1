@@ -78,7 +78,7 @@ namespace LesbianDB
 		}
 		private void InitLocks(){
 			for(int i = 0; i < 65536; ){
-				asyncReaderWriterLocks[i++] = new AsyncReaderWriterLock();
+				asyncReaderWriterLocks[i++] = new AsyncReaderWriterLock(true);
 			}
 		}
 		private readonly IAsyncDictionary asyncDictionary;
@@ -146,12 +146,14 @@ namespace LesbianDB
 			//Lock checking
 			Dictionary<ushort, bool> lockLevels = new Dictionary<ushort, bool>();
 			bool write = writes.Count > 0;
+			bool conditional;
 			if(write){
 				if(writefastrecover){
 					if(writes.ContainsKey("LesbianDB_reserved_binlog_height")){
 						write = false;
 						binlog_buffer = null;
 						binlog_writelen = 0;
+						conditional = false;
 						goto nowrite;
 					}
 				}
@@ -181,9 +183,11 @@ namespace LesbianDB
 					}
 					BinaryPrimitives.WriteInt32BigEndian(binlog_buffer.AsSpan(0, 4), binlog_writelen);
 				}
+				conditional = conditions.Count > 0;
 			} else{
 				binlog_buffer = null;
 				binlog_writelen = 0;
+				conditional = false;
 			}
 
 
@@ -192,9 +196,11 @@ namespace LesbianDB
 			{
 				lockLevels.TryAdd((ushort)(str.GetHashCode() & 65535), false);
 			}
-			foreach (KeyValuePair<string, string> keyValuePair in conditions)
-			{
-				lockLevels.TryAdd((ushort)(keyValuePair.Key.GetHashCode() & 65535), false);
+			if(conditional){
+				foreach (KeyValuePair<string, string> keyValuePair in conditions)
+				{
+					lockLevels.TryAdd((ushort)(keyValuePair.Key.GetHashCode() & 65535), false);
+				}
 			}
 			//Lock ordering
 			List<ushort> locks = lockLevels.Keys.ToList();
@@ -204,16 +210,19 @@ namespace LesbianDB
 			Dictionary<string, Task<string>> pendingReads = new Dictionary<string, Task<string>>();
 			Dictionary<string, string> readResults = new Dictionary<string, string>();
 
+			bool upgraded = false;
+
 			//Acquire locks
 			foreach (ushort id in locks)
 			{
+				AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[id];
 				if (lockLevels[id])
 				{
-					await asyncReaderWriterLocks[id].AcquireWriterLock();
+					await asyncReaderWriterLock.AcquireUpgradeableReadLock();
 				}
 				else
 				{
-					await asyncReaderWriterLocks[id].AcquireReaderLock();
+					await asyncReaderWriterLock.AcquireReaderLock();
 				}
 			}
 			await damageCheckingLock.AcquireReaderLock();
@@ -239,13 +248,26 @@ namespace LesbianDB
 				{
 					return readResults;
 				}
-				foreach (KeyValuePair<string, string> kvp in conditions)
-				{
-					if (kvp.Value != await pendingReads[kvp.Key])
+				if(conditional){
+					foreach (KeyValuePair<string, string> kvp in conditions)
 					{
-						return readResults;
+						if (kvp.Value != await pendingReads[kvp.Key])
+						{
+							return readResults;
+						}
 					}
 				}
+				//Upgrade locks
+				foreach (ushort id in locks)
+				{
+					AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[id];
+					if (lockLevels[id])
+					{
+						await asyncReaderWriterLock.UpgradeToWriteLock();
+					}
+				}
+				upgraded = true;
+
 				writes = Misc.ScrubNoEffectWrites(writes, pendingReads);
 				if (writes.Count == 0)
 				{
@@ -303,13 +325,19 @@ namespace LesbianDB
 				try{
 					foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 					{
+						AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
 						if (keyValuePair.Value)
 						{
-							asyncReaderWriterLocks[keyValuePair.Key].ReleaseWriterLock();
+							if (upgraded)
+							{
+								asyncReaderWriterLock.FullReleaseUpgradedLock();
+							} else{
+								asyncReaderWriterLock.ReleaseUpgradeableReadLock();
+							}
 						}
 						else
 						{
-							asyncReaderWriterLocks[keyValuePair.Key].ReleaseReaderLock();
+							asyncReaderWriterLock.ReleaseReaderLock();
 						}
 					}
 				} catch(Exception e){

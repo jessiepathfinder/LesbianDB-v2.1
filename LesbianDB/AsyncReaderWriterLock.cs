@@ -11,12 +11,41 @@ namespace LesbianDB
 	{
 		private readonly AsyncMutex reader = new AsyncMutex();
 		private readonly AsyncMutex writer = new AsyncMutex();
+		private readonly AsyncMutex upgradableReader;
+		public AsyncReaderWriterLock(){
+			
+		}
+		public AsyncReaderWriterLock(bool upgradeable){
+			if(upgradeable){
+				upgradableReader = new AsyncMutex();
+			}
+		}
 		private long _readerCount;
+
+		public async Task AcquireUpgradeableReadLock(){
+			await AcquireReaderLock();
+			await upgradableReader.Enter();
+		}
+		public void ReleaseUpgradeableReadLock(){
+			upgradableReader.Exit();
+			ReleaseReaderLock();
+		}
+		public async Task UpgradeToWriteLock(){
+			await writer.Enter();
+			if(Interlocked.Decrement(ref _readerCount) > 0){
+				await reader.Enter();
+			}
+		}
+		public void FullReleaseUpgradedLock()
+		{
+			upgradableReader.Exit();
+			ReleaseWriterLock();
+		}
 
 		public async Task AcquireWriterLock()
 		{
 			await writer.Enter();
-			await SafeAcquireReadSemaphore();
+			await reader.Enter();
 		}
 
 		public void ReleaseWriterLock()
@@ -30,16 +59,7 @@ namespace LesbianDB
 			await writer.Enter();
 			if (Interlocked.Increment(ref _readerCount) == 1)
 			{
-				try
-				{
-					await SafeAcquireReadSemaphore();
-				}
-				catch
-				{
-					Interlocked.Decrement(ref _readerCount);
-
-					throw;
-				}
+				await reader.Enter();
 			}
 			writer.Exit();
 		}
@@ -49,19 +69,6 @@ namespace LesbianDB
 			if (Interlocked.Decrement(ref _readerCount) == 0)
 			{
 				reader.Exit();
-			}
-		}
-
-		private async Task SafeAcquireReadSemaphore()
-		{
-			try
-			{
-				await reader.Enter();
-			}
-			catch
-			{
-				writer.Exit();
-				throw;
 			}
 		}
 	}
