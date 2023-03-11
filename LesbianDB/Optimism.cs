@@ -23,6 +23,11 @@ namespace LesbianDB.Optimism.Core
 		public Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys);
 		//NOTE: the write method is not asynchromous since writes are cached in-memory until commit
 		public void Write(string key, string value);
+		/// <summary>
+		/// Throws OptimisticFault if we made incorrect assumptions. Should be called once in a while in loops.
+		/// </summary>
+		/// <returns></returns>
+		public Task Safepoint();
 	}
 	/// <summary>
 	/// An optimistic fault that causes the optimistic execution manager to revert and restart the transaction
@@ -36,13 +41,14 @@ namespace LesbianDB.Optimism.Core
 	public sealed class OptimisticExecutionManager : IOptimisticExecutionManager
 	{
 		private readonly IDatabaseEngine[] databaseEngines;
+		private readonly int databaseEnginesCount;
 
-		private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions = new ConcurrentDictionary<string, string>[256];
-		private static async void Collect(WeakReference<ConcurrentDictionary<string, string>[]> weakReference, long softMemoryLimit){
+		private readonly ConcurrentXHashMap<string>[] optimisticCachePartitions = new ConcurrentXHashMap<string>[256];
+		private static async void Collect(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit){
 		start:
 			await Task.Delay(Misc.FastRandom(1, 300));
 			
-			if(weakReference.TryGetTarget(out ConcurrentDictionary<string, string>[] optimisticCachePartitions)){
+			if(weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] optimisticCachePartitions)){
 				if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
 				{
 					optimisticCachePartitions[Misc.FastRandom(0, 256)].Clear();
@@ -53,302 +59,267 @@ namespace LesbianDB.Optimism.Core
 		public OptimisticExecutionManager(IDatabaseEngine[] databaseEngines, long softMemoryLimit)
 		{
 			this.databaseEngines = databaseEngines ?? throw new ArgumentNullException(nameof(databaseEngines));
-			for (int i = 0; i < 256; ){
-				optimisticCachePartitions[i++] = new ConcurrentDictionary<string, string>();
+			int count = databaseEngines.Length;
+			if (count == 0)
+			{
+				throw new ArgumentOutOfRangeException("At least 1 database engine required");
 			}
-			Collect(new WeakReference<ConcurrentDictionary<string, string>[]>(optimisticCachePartitions, false), softMemoryLimit);
+			for (int i = 0; i < 256; ){
+				optimisticCachePartitions[i++] = new ConcurrentXHashMap<string>();
+			}
+			Collect(new WeakReference<ConcurrentXHashMap<string>[]>(optimisticCachePartitions, false), softMemoryLimit);
+			databaseEnginesCount = count;
 		}
 		public OptimisticExecutionManager(IDatabaseEngine databaseEngine, long softMemoryLimit) {
 			databaseEngines = new IDatabaseEngine[]{databaseEngine ?? throw new ArgumentNullException(nameof(databaseEngine))};
 			for (int i = 0; i < 256;)
 			{
-				optimisticCachePartitions[i++] = new ConcurrentDictionary<string, string>();
+				optimisticCachePartitions[i++] = new ConcurrentXHashMap<string>();
 			}
-			Collect(new WeakReference<ConcurrentDictionary<string, string>[]>(optimisticCachePartitions, false), softMemoryLimit);
+			Collect(new WeakReference<ConcurrentXHashMap<string>[]>(optimisticCachePartitions, false), softMemoryLimit);
 		}
-		private ConcurrentDictionary<string, string> GetOptimisticCachePartition(string key)
+
+		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction)
 		{
-			return optimisticCachePartitions[("Lesbians are optimistic " + key).GetHashCode() & 255];
+			ConcurrentDictionary<string, string> readCache = new ConcurrentDictionary<string, string>();
+			Dictionary<string, bool> consistentReads = new Dictionary<string, bool>();
+			while(true){
+				OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(databaseEngines, readCache, consistentReads, optimisticCachePartitions);
+				T ret;
+				Exception failure;
+				try{
+					ret = await optimisticFunction(optimisticExecutionScope);
+					failure = null;
+				} catch(OptimisticFault)
+				{
+					IReadOnlyDictionary<string, string> state = optimisticExecutionScope.barrierReads ?? await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys(readCache.ToArray()), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
+					foreach(KeyValuePair<string, string> keyValuePair in state){
+						string key = keyValuePair.Key;
+						optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair.Value;
+					}
+					readCache = new ConcurrentDictionary<string, string>(state);
+					continue;
+				} catch (Exception e)
+				{
+					ret = default;
+					failure = e;
+				}
+
+				KeyValuePair<string, string>[] keyValuePairs1 = readCache.ToArray();
+				IReadOnlyDictionary<string, string> writeCache;
+				IReadOnlyDictionary<string, string> conditions;
+				if (failure is null){
+					KeyValuePair<string, string>[] keyValuePairs = optimisticExecutionScope.writecache.ToArray();
+					if (keyValuePairs.Length == 0)
+					{
+						writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
+						conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
+					}
+					else
+					{
+						conditions = new Dictionary<string, string>(keyValuePairs1);
+						Dictionary<string, string> keyValuePairs2 = new Dictionary<string, string>();
+						foreach(KeyValuePair<string, string> keyValuePair in keyValuePairs){
+							string key = keyValuePair.Key;
+							string value = keyValuePair.Value;
+							if(conditions.TryGetValue(key, out string read)){
+								if(value == read){
+									continue;
+								}
+							}
+							keyValuePairs2.Add(key, value);
+						}
+
+						writeCache = keyValuePairs2.Count > 0 ? keyValuePairs2 : (IReadOnlyDictionary<string, string>)SafeEmptyReadOnlyDictionary<string, string>.instance;
+					}
+				} else{
+					writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
+					conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
+				}
+				bool restart = false;
+				IReadOnlyDictionary<string, string> reads = await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys(keyValuePairs1), conditions, writeCache);
+				foreach(KeyValuePair<string, string> keyValuePair1 in keyValuePairs1){
+					if (reads[keyValuePair1.Key] == keyValuePair1.Value)
+					{
+						continue;
+					}
+					restart = true;
+				}
+				if(restart)
+				{
+					foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs1)
+					{
+						string key = keyValuePair1.Key;
+						optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
+					}
+					readCache = new ConcurrentDictionary<string, string>(reads);
+				} else{
+					if (failure is null)
+					{
+						foreach (KeyValuePair<string, string> keyValuePair1 in writeCache)
+						{
+							string key = keyValuePair1.Key;
+							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
+						}
+						foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs1)
+						{
+							string key = keyValuePair1.Key;
+							if(writeCache.ContainsKey(key)){
+								continue;
+							}
+							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
+						}
+						return ret;
+					}
+					ExceptionDispatchInfo.Throw(failure);
+				}
+			}
 		}
-		private static readonly IReadOnlyDictionary<string, string> emptyDictionary = SafeEmptyReadOnlyDictionary<string, string>.instance;
-
-		/// <summary>
-		/// Help maintain the integrity of the optimistic execution scope while still performing optimistic optimizations
-		/// based on what we observed from previous executions
-		/// </summary>
-		private sealed class ProxyOptimisticExecutionScope : IOptimisticExecutionScope{
-			private IOptimisticExecutionScope underlying;
-			public bool disposed;
-			public volatile int busylock;
-			public readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
-
-			public ProxyOptimisticExecutionScope(IOptimisticExecutionScope underlying)
+		private static IEnumerable<string> GetKeys(KeyValuePair<string, string>[] keyValuePairs)
+		{
+			foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs)
 			{
-				this.underlying = underlying;
+				yield return keyValuePair.Key;
+			}
+		}
+		private sealed class OptimisticExecutionScope : IOptimisticExecutionScope{
+			private readonly IDatabaseEngine[] databaseEngines;
+			private readonly int databaseCount;
+			private readonly ConcurrentXHashMap<string>[] optimisticCachePartitions;
+			public readonly ConcurrentDictionary<string, string> writecache = new ConcurrentDictionary<string, string>();
+			private readonly ConcurrentDictionary<string, string> readcache;
+			private readonly IReadOnlyDictionary<string, bool> consistentReads;
+			public volatile IReadOnlyDictionary<string, string> barrierReads;
+
+			public OptimisticExecutionScope(IDatabaseEngine[] databaseEngines, ConcurrentDictionary<string, string> readcache, IReadOnlyDictionary<string, bool> consistentReads, ConcurrentXHashMap<string>[] optimisticCachePartitions)
+			{
+				this.databaseEngines = databaseEngines;
+				this.readcache = readcache;
+				databaseCount = databaseEngines.Length;
+				this.consistentReads = consistentReads;
+				this.optimisticCachePartitions = optimisticCachePartitions;
+			}
+
+			public async Task Safepoint()
+			{
+				KeyValuePair<string, string>[] keyValuePairs = readcache.ToArray();
+				IReadOnlyDictionary<string, string> reads = await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(GetKeys(keyValuePairs), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
+				foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs){
+					if(reads[keyValuePair.Key] == keyValuePair.Value){
+						break;
+					}
+					Interlocked.CompareExchange(ref barrierReads, reads, null);
+					throw new OptimisticFault();
+				}
 			}
 
 			public async Task<string> Read(string key)
 			{
-				await asyncReaderWriterLock.AcquireReaderLock();
-				try
+				if (key is null)
 				{
-					if (disposed)
-					{
-						throw new ObjectDisposedException("IOptimisticExecutionScope");
+					throw new ArgumentNullException(key);
+				}
+				if (writecache.TryGetValue(key, out string value1)){
+					return value1;
+				}
+				if (readcache.TryGetValue(key, out value1))
+				{
+					if(writecache.TryGetValue(key, out string value2)){
+						return value2;
 					}
-					return await underlying.Read(key);
+					return value1;
 				}
-				finally
+				ConcurrentXHashMap<string> cacheBucket = optimisticCachePartitions[key.GetHashCode() & 255];
+				Hash256 hash = new Hash256(key);
+				if(cacheBucket.TryGetValue(hash, out value1)){
+					value1 = readcache.GetOrAdd(key, value1);
+					if (writecache.TryGetValue(key, out string value2))
+					{
+						return value2;
+					}
+					return value1;
+				}
+				string dbvalue = (await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(new string[] { key }, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance))[key];
+				cacheBucket[hash] = dbvalue;
+				string value3 = readcache.GetOrAdd(key, dbvalue);
+				if (writecache.TryGetValue(key, out string value4))
 				{
-					asyncReaderWriterLock.ReleaseReaderLock();
+					return value4;
 				}
+				return value3;
 			}
 
 			public async Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys)
 			{
-				await asyncReaderWriterLock.AcquireReaderLock();
-				try
-				{
-					if (disposed)
-					{
-						throw new ObjectDisposedException("IOptimisticExecutionScope");
-					}
-					return await underlying.VolatileRead(keys);
-				}
-				finally
-				{
-					asyncReaderWriterLock.ReleaseReaderLock();
-				}
-			}
+				Dictionary<string, bool> dedup = new Dictionary<string, bool>();
 
-			public void Write(string key, string value)
-			{
-				while (Interlocked.Exchange(ref busylock, 1) == 1)
-				{
-					
-				}
-				try
-				{
-					if(disposed){
-						throw new ObjectDisposedException("IOptimisticExecutionScope");
-					}
-					underlying.Write(key, value);
-				} finally{
-					busylock = 0;
-				}
-			}
-		}
-		private sealed class OptimisticExecutionScope : IOptimisticExecutionScope
-		{
-			private readonly ConcurrentDictionary<string, string>[] optimisticCachePartitions;
-			private readonly IDatabaseEngine[] databaseEngines;
-			public readonly ConcurrentDictionary<string, string> L1ReadCache = new ConcurrentDictionary<string, string>();
-			public readonly ConcurrentDictionary<string, string> L1WriteCache = new ConcurrentDictionary<string, string>();
-			public readonly ConcurrentDictionary<string, bool> cacheableVolatileReads = new ConcurrentDictionary<string, bool>();
-
-			public OptimisticExecutionScope(ConcurrentDictionary<string, string>[] optimisticCachePartitions, IDatabaseEngine[] databaseEngines)
-			{
-				this.optimisticCachePartitions = optimisticCachePartitions;
-				this.databaseEngines = databaseEngines;
-			}
-
-			private ConcurrentDictionary<string, string> GetOptimisticCachePartition(string key)
-			{
-				return optimisticCachePartitions[("Lesbians are optimistic " + key).GetHashCode() & 255];
-			}
-			public async Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys){
-				Dictionary<string, string> keyValuePairs1 = new Dictionary<string, string>();
+				Dictionary<string, string> reads = new Dictionary<string, string>();
+				bool checkingoptimizability = true;
 				foreach(string key in keys){
-					if(L1WriteCache.TryGetValue(key, out string val2)){
-						keyValuePairs1.TryAdd(key, val2);
-					} else if(cacheableVolatileReads.ContainsKey(key)){
-						keyValuePairs1.TryAdd(key, L1ReadCache[key]);
-					} else{
-						goto pessimistic;
+					if(key is null){
+						throw new NullReferenceException("Reading null keys is not supported");
 					}
-				}
-				return keyValuePairs1;
-			pessimistic:
-				IReadOnlyDictionary<string, string> read = await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(keys, emptyDictionary, emptyDictionary);
-				foreach(KeyValuePair<string, string> keyValuePair in read){
-					string value = keyValuePair.Value;
-					if(L1ReadCache.GetOrAdd(keyValuePair.Key, value) != value){
-						throw new OptimisticFault();
-					}
-				}
-
-				IDictionary<string, string> keyValuePairs = read as IDictionary<string, string> ?? new Dictionary<string, string>();
-				if(ReferenceEquals(keyValuePairs, read)){
-					foreach(string key in keys){
-						if(L1WriteCache.TryGetValue(key, out string value)){
-							keyValuePairs[key] = value;
-						}
-					}
-				} else{
-					foreach (string key in read.Keys)
-					{
-						if (L1WriteCache.TryGetValue(key, out string value))
+					if(dedup.TryAdd(key, false) & checkingoptimizability){
+						if (consistentReads.ContainsKey(key))
 						{
-							keyValuePairs.Add(key, value);
-						} else{
-							keyValuePairs.Add(read[key], value);
+							if (writecache.TryGetValue(key, out string value))
+							{
+								reads.Add(key, value);
+							}
+							string value1 = readcache[key];
+							if (writecache.TryGetValue(key, out value))
+							{
+								reads.Add(key, value);
+							}
+							else
+							{
+								reads.Add(key, value1);
+							}
+						}
+						else
+						{
+							checkingoptimizability = false;
 						}
 					}
 				}
-				return (IReadOnlyDictionary<string, string>)keyValuePairs;
-			}
-
-			public Task<string> Read(string key)
-			{
-				if(L1WriteCache.TryGetValue(key, out string value)){
-					return Task.FromResult(value);
-				} else if (L1ReadCache.TryGetValue(key, out value))
-				{
-					if (L1WriteCache.TryGetValue(key, out string value2))
-					{
-						return Task.FromResult(value2);
+				if(checkingoptimizability){
+					return reads;
+				}
+				reads.Clear();
+				bool success = true;
+				foreach(KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(dedup.Keys, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance)){
+					string key = keyValuePair.Key;
+					string value = keyValuePair.Value;
+					string existing = readcache.GetOrAdd(key, value);
+					if(success){
+						success = existing == value;
+						if (writecache.TryGetValue(key, out string value1))
+						{
+							reads.Add(key, value1);
+						}
+						else
+						{
+							reads.Add(key, value);
+						}
 					}
-					else
-					{
-						return Task.FromResult(value);
-					}
-				} else{
-					return ReadUnderlying(key);
+					optimisticCachePartitions[key.GetHashCode() & 255][key] = value;
+					
 				}
-			}
-			private async Task<string> ReadUnderlying(string key){
-				ConcurrentDictionary<string, string> optimisticCachePartition = GetOptimisticCachePartition(key);
-				if (!optimisticCachePartition.TryGetValue(key, out string value))
-				{
-					value = optimisticCachePartition.GetOrAdd(key, (await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(new string[] { key }, emptyDictionary, emptyDictionary))[key]);
+				if(success){
+					return reads;
 				}
-				value = L1ReadCache.GetOrAdd(key, value);
-
-				if (L1WriteCache.TryGetValue(key, out string value2))
-				{
-					return value2;
-				}
-				else
-				{
-					return value;
-				}
+				throw new OptimisticFault();
 			}
 
 			public void Write(string key, string value)
 			{
-				if (key.StartsWith("LesbianDB_reserved_"))
-				{
-					throw new InvalidOperationException("Writing to keys starting with \"LesbianDB_reserved_\" is discouraged");
+				if(key is null){
+					throw new ArgumentNullException(key);
 				}
-				L1WriteCache[key] = value;
+				writecache[key] = value;
 			}
 		}
-		private static IEnumerable<string> GetKeys(KeyValuePair<string, string>[] keyValuePairs){
-			foreach(KeyValuePair<string, string> keyValuePair in keyValuePairs){
-				yield return keyValuePair.Key;
-			}
-		}
-		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction){
-			OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(optimisticCachePartitions, databaseEngines);
-		start:
-			T ret;
-			Exception exception = null;
-			ProxyOptimisticExecutionScope proxyOptimisticExecutionScope = new ProxyOptimisticExecutionScope(optimisticExecutionScope);
-			try
-			{
-				ret = await optimisticFunction(proxyOptimisticExecutionScope);
-			} catch(Exception e){
-				if(e is OptimisticFault){
-					if(optimisticExecutionScope.L1ReadCache.Count > 0){
-						foreach (KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(GetKeys(optimisticExecutionScope.L1ReadCache.ToArray()), emptyDictionary, emptyDictionary))
-						{
-							string key = keyValuePair.Key;
-							optimisticExecutionScope.cacheableVolatileReads.TryAdd(key, false);
-							optimisticExecutionScope.L1ReadCache[key] = keyValuePair.Value;
-						}
-					}
-					optimisticExecutionScope.L1WriteCache.Clear();
-					goto start;
-				} else{
-					ret = default;
-					exception = e;
-					
-				}
-			} finally{
-				AsyncReaderWriterLock asyncReaderWriterLock = proxyOptimisticExecutionScope.asyncReaderWriterLock;
-				Task tsk = asyncReaderWriterLock.AcquireWriterLock();
-				try{
-					while(Interlocked.Exchange(ref proxyOptimisticExecutionScope.busylock, 1) == 1){
-							
-					}
-					try{
-						await tsk;
-						proxyOptimisticExecutionScope.disposed = true;
-					} finally{
-						proxyOptimisticExecutionScope.busylock = 0;
-					}
-				} finally{
-					await tsk;
-					asyncReaderWriterLock.ReleaseWriterLock();
-				}
-			}
-			//Conditions
-			Dictionary<string, string> reads = new Dictionary<string, string>(optimisticExecutionScope.L1ReadCache.ToArray());
-
-			//Effects
-			Dictionary<string, string> writes;
-			if(exception is null){
-				writes = new Dictionary<string, string>();
-				foreach (KeyValuePair<string, string> kvp in optimisticExecutionScope.L1WriteCache.ToArray())
-				{
-					string key = kvp.Key;
-					string value = kvp.Value;
-					if (reads.TryGetValue(key, out string old))
-					{
-						if (old == value)
-						{
-							continue;
-						}
-					}
-					writes.Add(key, value);
-				}
-			} else{
-				writes = new Dictionary<string, string>();
-			}
-
-			IReadOnlyDictionary<string, string> updated = await databaseEngines[Misc.FastRandom(0, databaseEngines.Length)].Execute(reads.Keys, writes.Count == 0 ? emptyDictionary : reads, writes);
-			bool success = true;
-			foreach(KeyValuePair<string, string> kvp in updated){
-				string key = kvp.Key;
-				string value = kvp.Value;
-				success &= reads[key] == value;
-			}
-			if (success)
-			{
-				if(exception is null){
-					foreach (KeyValuePair<string, string> kvp in writes)
-					{
-						string key = kvp.Key;
-						GetOptimisticCachePartition(key)[key] = kvp.Value;
-					}
-					return ret;
-				} else{
-					ExceptionDispatchInfo.Throw(exception);
-					throw exception;
-				}
-			}
-			else
-			{
-				optimisticExecutionScope.L1WriteCache.Clear();
-				foreach (KeyValuePair<string, string> kvp in updated)
-				{
-					string key = kvp.Key;
-					optimisticExecutionScope.cacheableVolatileReads.TryAdd(key, false);
-					optimisticExecutionScope.L1ReadCache[key] = kvp.Value;
-				}
-				goto start;
-			}
-		}
+		
 	}
 	public interface ISnapshotReadScope : IOptimisticExecutionScope{
 		
@@ -405,6 +376,67 @@ namespace LesbianDB.Optimism.Core
 		public void Write(string key, string value)
 		{
 			underlying.Write(key, value);
+		}
+
+		public Task Safepoint()
+		{
+			return Misc.completed;
+		}
+	}
+	/// <summary>
+	/// A safepoint controller that aims to target 1% of our transaction execution time in safepoint
+	/// </summary>
+	public sealed class SafepointController{
+		private long timeSpentInSafepoint;
+		private long totalSafepoints;
+		private long lastSafepointTime;
+		private readonly long starttime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+		private readonly IOptimisticExecutionScope scope;
+		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
+
+		public SafepointController(IOptimisticExecutionScope scope)
+		{
+			this.scope = scope ?? throw new ArgumentNullException(nameof(scope));
+		}
+		public async Task SafepointIfNeeded(){
+			long time;
+			long sincelastsafepoint;
+			long totalSafepointsCache;
+			await asyncReaderWriterLock.AcquireReaderLock();
+			try{
+				time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+				sincelastsafepoint = time - lastSafepointTime;
+				if (time - starttime < 500)
+				{
+					return;
+				}
+				totalSafepointsCache = totalSafepoints;
+				if(totalSafepointsCache > 0){
+					if((timeSpentInSafepoint * 100) / totalSafepointsCache > sincelastsafepoint)
+					{
+						return;
+					}
+				}
+			} finally{
+				asyncReaderWriterLock.ReleaseReaderLock();
+			}
+			await asyncReaderWriterLock.AcquireWriterLock();
+			try{
+				if (totalSafepoints == totalSafepointsCache)
+				{
+					totalSafepoints = totalSafepointsCache + 1;
+					await scope.Safepoint();
+					timeSpentInSafepoint += DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - time;
+				}
+			} finally{
+				asyncReaderWriterLock.ReleaseWriterLock();
+			}
+		}
+		public void EnsureScopeIs(IOptimisticExecutionScope optimisticExecutionScope){
+			if(ReferenceEquals(scope, optimisticExecutionScope)){
+				return;
+			}
+			throw new InvalidOperationException("This safepoint controller is created with a diffrent optimistic execution scope");
 		}
 	}
 }

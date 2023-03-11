@@ -141,6 +141,11 @@ namespace LesbianDB.IntelliEX
 			{
 				writes[key] = value;
 			}
+
+			public Task Safepoint()
+			{
+				return Misc.completed;
+			}
 		}
 		private static readonly BigInteger one = BigInteger.One;
 		private static readonly BigInteger zero = BigInteger.Zero;

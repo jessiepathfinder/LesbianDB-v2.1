@@ -183,9 +183,7 @@ namespace LesbianDB
 						cache[key] = new CacheLine(false, value.value);
 					}
 				}
-				while(tasks.TryDequeue(out Task tsk)){
-					await tsk;
-				}
+				await tasks.ToArray();
 			} finally{
 				asyncReaderWriterLock.ReleaseWriterLock();
 			}
@@ -221,9 +219,7 @@ namespace LesbianDB
 						_this.cache.TryRemove(key, out _);
 					}
 
-					while(flushes.TryDequeue(out Task tsk)){
-						await tsk;
-					}
+					await flushes.ToArray();
 				}
 				finally
 				{

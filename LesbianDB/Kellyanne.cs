@@ -143,10 +143,7 @@ namespace LesbianDB{
 					redoLogHead.shard = shard;
 					id = redoLogItem.nextid;
 					shard = redoLogItem.nextshard;
-					while (tasks.TryDequeue(out Task tsk))
-					{
-						await tsk;
-					}
+					await tasks.ToArray();
 				}
 				if (id is null)
 				{

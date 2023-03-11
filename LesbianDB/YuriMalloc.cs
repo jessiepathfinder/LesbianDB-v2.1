@@ -123,14 +123,15 @@ namespace LesbianDB
 				try{
 					address = fileStream.Seek(0, SeekOrigin.End);
 					await fileStream.WriteAsync(bytes);
-					Queue<Task> tasks = new Queue<Task>();
-					tasks.Enqueue(fileStream.FlushAsync());
-					foreach(Stream str in recycler.ToArray()){
-						tasks.Enqueue(str.FlushAsync());
+					Task flushFileStream = fileStream.FlushAsync();
+					Stream[] streams = recycler.ToArray();
+					int length = streams.Length;
+					Task[] tasks = new Task[length];
+					for(int i = 0; i < length; ++i){
+						tasks[i] = streams[i].FlushAsync();
 					}
-					while(tasks.TryDequeue(out Task tsk)){
-						await tsk;
-					}
+					await flushFileStream;
+					await tasks;
 				} finally{
 					asyncMutex.Exit();
 				}

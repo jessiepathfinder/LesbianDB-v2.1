@@ -379,13 +379,11 @@ namespace LesbianDB
 
 		public async Task Flush()
 		{
-			Queue<Task> tasks = new Queue<Task>();
-			foreach(IFlushableAsyncDictionary flushableAsyncDictionary in flushableAsyncDictionaries){
-				tasks.Enqueue(flushableAsyncDictionary.Flush());
+			Task[] tasks = new Task[65536];
+			for(int i = 0; i < 65536; ++i){
+				tasks[i] = flushableAsyncDictionaries[i].Flush();
 			}
-			while(tasks.TryDequeue(out Task tsk)){
-				await tsk;
-			}
+			await tasks;
 		}
 
 		public Task<string> Read(string key)

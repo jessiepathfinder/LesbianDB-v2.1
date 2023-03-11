@@ -217,6 +217,11 @@ namespace LesbianDB.Optimism.Snapshot
 			{
 				writeCache[key] = value;
 			}
+
+			public Task Safepoint()
+			{
+				return Misc.completed;
+			}
 		}
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction)
 		{

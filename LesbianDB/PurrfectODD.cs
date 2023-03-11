@@ -55,15 +55,13 @@ namespace LesbianDB
 				}
 				BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), len);
 				Task writeBinlog = WriteAndFlushBinlog(buffer, len + 4);
-				Queue<Task> writeTasks = new Queue<Task>();
+				Task[] writeTasks = new Task[writes.Count];
+				int xctr = 0;
 				foreach (KeyValuePair<string, string> keyValuePair in writes)
 				{
-					writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
+					writeTasks[xctr++] = asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value);
 				}
-				foreach (Task tsk in writeTasks)
-				{
-					await tsk;
-				}
+				await writeTasks;
 				await writeBinlog;
 			}
 		}
@@ -218,16 +216,15 @@ namespace LesbianDB
 					}
 					dictAndGetEngine.dictionary.Add(key, keyValuePair.Value);
 				}
-				Queue<Task> flushings = new Queue<Task>();
+				Task[] flushings = new Task[dictionaries.Count];
+				int xctr = 0;
 				Queue<ushort> dirty = new Queue<ushort>();
 				foreach(KeyValuePair<ushort, DictAndGetEngine> keyValuePair1 in dictionaries){
 					DictAndGetEngine dictAndGetEngine = keyValuePair1.Value;
-					flushings.Enqueue((await dictAndGetEngine.getDatabaseEngine).Execute(dictAndGetEngine.dictionary));
+					flushings[xctr++] = (await dictAndGetEngine.getDatabaseEngine).Execute(dictAndGetEngine.dictionary);
 					dirty.Enqueue(keyValuePair1.Key);
 				}
-				while(flushings.TryDequeue(out Task tsk)){
-					await tsk;
-				}
+				await flushings;
 				while (dirty.TryDequeue(out ushort ky))
 				{
 					BinaryPrimitives.WriteInt64BigEndian(map.AsSpan(ky * 8, 8), binlogs[ky].Position);

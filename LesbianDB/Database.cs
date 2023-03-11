@@ -61,14 +61,13 @@ namespace LesbianDB
 						GC.SuppressFinalize(bsonDataReader);
 						jsonSerializer.Populate(bsonDataReader, delta);
 					}
-					Queue<Task> tasks = new Queue<Task>();
+					Task[] tasks = new Task[delta.Count];
+					int ctr = 0;
 					foreach(KeyValuePair<string, string> kvp in delta){
-						tasks.Enqueue(asyncDictionary.Write(kvp.Key, kvp.Value));
+						tasks[ctr++] = asyncDictionary.Write(kvp.Key, kvp.Value);
 					}
 					delta.Clear();
-					while(tasks.TryDequeue(out Task tsk)){
-						await tsk;
-					}
+					await tasks;
 				}
 			} finally{
 				if(buffer is { }){
@@ -305,10 +304,7 @@ namespace LesbianDB
 					{
 						writeTasks.Enqueue(asyncDictionary.Write(keyValuePair.Key, keyValuePair.Value));
 					}
-					foreach (Task tsk in writeTasks)
-					{
-						await tsk;
-					}
+					await writeTasks.ToArray();
 				}
 				finally
 				{

@@ -12,6 +12,7 @@ using System.Numerics;
 using LesbianDB.Optimism.Armitage;
 using LesbianDB.Optimism.Snapshot;
 using LesbianDB.IntelliEX;
+using LesbianDB.Optimism.YuriTables.NextGeneration;
 
 namespace LesbianDB.Tests
 {
@@ -125,6 +126,49 @@ namespace LesbianDB.Tests
 			Assert.IsFalse((await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopFirst("queue"))).exists);
 			Assert.IsFalse((await optimisticExecutionManager.ExecuteOptimisticFunction((IOptimisticExecutionScope optimisticExecutionScope) => optimisticExecutionScope.ArrayTryPopLast("queue"))).exists);
 		}
+		[Test]
+		public async Task YuriTablesNextGenerationArrayQueue()
+		{
+			//The EnhancedSequentialAccessDictionary is never flushed, so it's effectively a pure memory engine
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0);
+			await optimisticExecutionManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				Assert.IsTrue(await optimisticExecutionScope.TryCreateArray("array"));
+				Assert.IsFalse(await optimisticExecutionScope.TryCreateArray("array"));
+				ArrayHandle arrayHandle = await optimisticExecutionScope.OpenArray("array");
+				BigInteger end = 4096;
+				for (ushort i = 0; i < 4096; ++i){
+					await arrayHandle.PushStart(i.ToString());
+				}
+				for (ushort i = 0; i < 4096; ++i)
+				{
+					Assert.AreEqual(i.ToString(), await arrayHandle.Read(4095 - i));
+				}
+				
+				Assert.AreEqual(end, await arrayHandle.Length());
+				for (ushort i = 0; i < 4096; ++i)
+				{
+					Assert.AreEqual(i.ToString(), (await arrayHandle.TryPopEnd()).value);
+				}
+				Assert.AreEqual(BigInteger.Zero, await arrayHandle.Length());
+				Assert.False((await arrayHandle.TryPopEnd()).exists);
+				Assert.False((await arrayHandle.TryPopStart()).exists);
+				for (ushort i = 0; i < 4096; ++i)
+				{
+					string str = i.ToString();
+					await arrayHandle.PushEnd(str);
+					Assert.AreEqual(str, await arrayHandle.Read(i));
+				}
+				Assert.AreEqual(end, await arrayHandle.Length());
+				for (ushort i = 0; i < 4096; ++i)
+				{
+					Assert.AreEqual(i.ToString(), (await arrayHandle.TryPopStart()).value);
+				}
+				Assert.AreEqual(BigInteger.Zero, await arrayHandle.Length());
+				Assert.False((await arrayHandle.TryPopEnd()).exists);
+				Assert.False((await arrayHandle.TryPopStart()).exists);
+				return false;
+			});
+		}
 
 		private static IEnumerable<ushort> Random2(){
 			Dictionary<ushort, bool> keyValuePairs = new Dictionary<ushort, bool>();
@@ -155,6 +199,62 @@ namespace LesbianDB.Tests
 				return false;
 			});
 		}
+		[Test]
+		public async Task NextGenerationSortedSet()
+		{
+			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
+				await optimisticExecutionScope.CreateSortedSet("z");
+				SortedSetHandle sortedSetHandle = await optimisticExecutionScope.OpenSortedSet("z");
+				foreach (BigInteger bigInteger in Random2())
+				{
+					string strbigint = bigInteger.ToString();
+					await sortedSetHandle.Write("meow_" + strbigint, strbigint + " LesbianDB now has an ISAM", bigInteger);
+				}
+				await sortedSetHandle.Write("meow_50", "asmr yuri lesbian neck kissing", 50);
+				await sortedSetHandle.Write("meow_40", "40 LesbianDB now has an ISAM", 30);
+				Assert.IsFalse(await sortedSetHandle.TryDelete("purrfect"));
+				await sortedSetHandle.Write("purrfect", "YuriTables Next Generation is better than MySQL", 10);
+				Assert.IsTrue(await sortedSetHandle.TryDelete("purrfect"));
+				BigInteger reference = BigInteger.Zero;
+				bool first30 = true;
+				SafepointController safepointController = new SafepointController(optimisticExecutionScope);
+				await foreach (SortedSetReadResult sortedSetReadResult in sortedSetHandle.Select(safepointController, CompareOperator.LessThan, 100, false))
+				{
+					if (reference == 40)
+					{
+						reference += 1;
+					}
+					string strbigint = reference.ToString();
+					if (sortedSetReadResult.bigInteger == 50)
+					{
+						Assert.AreEqual("asmr yuri lesbian neck kissing", sortedSetReadResult.value);
+					}
+					else
+					{
+						if (sortedSetReadResult.bigInteger == 30)
+						{
+							Assert.True(sortedSetReadResult.key == "meow_" + strbigint || sortedSetReadResult.key == "meow_40");
+							Assert.True(sortedSetReadResult.value == "30 LesbianDB now has an ISAM" || sortedSetReadResult.value == "40 LesbianDB now has an ISAM");
+							if (first30)
+							{
+								first30 = false;
+								Assert.AreEqual(reference, sortedSetReadResult.bigInteger);
+								continue;
+							}
+						}
+						else
+						{
+							Assert.AreEqual("meow_" + strbigint, sortedSetReadResult.key);
+							Assert.AreEqual(strbigint + " LesbianDB now has an ISAM", sortedSetReadResult.value);
+						}
+					}
+
+					Assert.AreEqual(reference++, sortedSetReadResult.bigInteger);
+				}
+				return false;
+			});
+		}
+
 		[Test] public async Task SortedSet(){
 			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 0).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) => {
 				foreach (BigInteger bigInteger in Random2())
@@ -220,6 +320,137 @@ namespace LesbianDB.Tests
 				Assert.AreEqual("true", await optimisticExecutionScope.HashGet("jessielesbian", "iscute"));
 				Assert.AreEqual("false", await optimisticExecutionScope.HashGet("jessielesbian", "uses.facebook"));
 				Assert.AreEqual("no", await optimisticExecutionScope.HashGet("jessielesbian", "uses.bitcoin"));
+				return false;
+			});
+		}
+		[Test]
+		public async Task NextGenerationTable() {
+			await new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), long.MaxValue).ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) =>
+			{
+				//Create table
+				await optimisticExecutionScope.CreateNGTable(new Dictionary<string, ColumnType>
+				{
+					{"name", ColumnType.UniqueString},
+					{"id", ColumnType.UniqueString},
+					{"height", ColumnType.SortedInt},
+					{"description", ColumnType.DataString}
+				}, "lesbians");
+				TableHandle tableHandle = await optimisticExecutionScope.OpenNGTable("lesbians");
+
+				//Insert rows
+				await tableHandle.Insert(new Dictionary<string, string> {
+					{"name", "jessielesbian" },
+					{"id", "1"},
+					{"description", "the cute, nice, and lesbian creator of LesbianDB v2.1"}
+				}, new Dictionary<string, BigInteger> {
+					{"height", 160}
+				});
+				await tableHandle.Insert(new Dictionary<string, string> {
+					{"name", "vnch-chan" },
+					{"id", "2"},
+					{"description", "busy making vietnam democratic"}
+				}, new Dictionary<string, BigInteger> {
+					{"height", 155}
+				});
+				await tableHandle.Insert(new Dictionary<string, string> {
+					{"name", "hillary-clinton" },
+					{"id", "3"},
+					{"description", "running for president"}
+				}, new Dictionary<string, BigInteger> {
+					{"height", 210}
+				});
+
+				//Primary key select tests
+				SafepointController safepointController = new SafepointController(optimisticExecutionScope);
+				Assert.IsFalse((await tableHandle.TryGetRowByPrimaryKey("name", "adolf-hitler")).found);
+
+				TryGetRowResult testrow = await tableHandle.TryGetRowByPrimaryKey("name", "jessielesbian");
+				Assert.IsTrue(testrow.found);
+				Assert.AreEqual("jessielesbian", testrow.theRow["name"]);
+				Assert.AreEqual("1", testrow.theRow["id"]);
+				Assert.AreEqual("160", testrow.theRow["height"]);
+				Assert.AreEqual("the cute, nice, and lesbian creator of LesbianDB v2.1", testrow.theRow["description"]);
+
+				//Ordered select tests
+				int count = 0;
+				await foreach (IReadOnlyDictionary<string, string> keyValuePairs in tableHandle.SelectOrderedBy(safepointController, "height", CompareOperator.LessThan, 200, false))
+				{
+					Assert.AreNotEqual("hillary-clinton", keyValuePairs["name"]);
+					++count;
+				}
+				Assert.AreEqual(2, count);
+
+				//Modify primary key
+				await tableHandle.UpdateRowByPrimaryKey("name", "id", "jessielesbian", "100");
+				testrow = await tableHandle.TryGetRowByPrimaryKey("name", "jessielesbian");
+				Assert.IsTrue(testrow.found);
+				Assert.AreEqual("jessielesbian", testrow.theRow["name"]);
+				Assert.AreEqual("100", testrow.theRow["id"]);
+				Assert.AreEqual("160", testrow.theRow["height"]);
+				Assert.AreEqual("the cute, nice, and lesbian creator of LesbianDB v2.1", testrow.theRow["description"]);
+
+				//Modify sorted data
+				BigInteger threehundred = 300;
+				await tableHandle.UpdateSortedIntByPrimaryKey("name", "height", "jessielesbian", threehundred);
+				await foreach (IReadOnlyDictionary<string, string> row in tableHandle.SelectOrderedBy(safepointController, "height", CompareOperator.EqualTo, threehundred, false))
+				{
+					Assert.NotNull(row);
+					Assert.AreEqual("jessielesbian", row["name"]);
+					Assert.AreEqual("100", row["id"]);
+					Assert.AreEqual("300", row["height"]);
+					++count;
+				}
+				Assert.AreEqual(3, count);
+				await tableHandle.UpdateMultipleRows(safepointController, "height", threehundred, CompareOperator.EqualTo, "description", "purring lesbian catgirl");
+				testrow = await tableHandle.TryGetRowByPrimaryKey("name", "jessielesbian");
+				Assert.IsTrue(testrow.found);
+				Assert.AreEqual("jessielesbian", testrow.theRow["name"]);
+				Assert.AreEqual("100", testrow.theRow["id"]);
+				Assert.AreEqual("300", testrow.theRow["height"]);
+				Assert.AreEqual("purring lesbian catgirl", testrow.theRow["description"]);
+				BigInteger twofifty = 250;
+				await tableHandle.UpdateMultipleIntRows(safepointController, "height", threehundred, CompareOperator.EqualTo, "height", twofifty);
+				testrow = await tableHandle.TryGetRowByPrimaryKey("name", "jessielesbian");
+				Assert.IsTrue(testrow.found);
+				Assert.AreEqual("jessielesbian", testrow.theRow["name"]);
+				Assert.AreEqual("100", testrow.theRow["id"]);
+				Assert.AreEqual("250", testrow.theRow["height"]);
+				Assert.AreEqual("purring lesbian catgirl", testrow.theRow["description"]);
+				await foreach (IReadOnlyDictionary<string, string> row in tableHandle.SelectOrderedBy(safepointController, "height", CompareOperator.EqualTo, twofifty, false))
+				{
+					Assert.NotNull(row);
+					Assert.AreEqual("jessielesbian", row["name"]);
+					Assert.AreEqual("100", row["id"]);
+					Assert.AreEqual("250", row["height"]);
+					++count;
+				}
+				Assert.AreEqual(4, count);
+				await tableHandle.DeleteRowByPrimaryKey("name", "jessielesbian");
+				await foreach (IReadOnlyDictionary<string, string> row in tableHandle.SelectOrderedBy(safepointController, "height", CompareOperator.GreaterThan, 200, false))
+				{
+					Assert.AreEqual(5, ++count);
+					Assert.NotNull(row);
+					Assert.AreEqual("hillary-clinton", row["name"]);
+					Assert.AreEqual("3", row["id"]);
+					Assert.AreEqual("210", row["height"]);
+				}
+				await foreach (IReadOnlyDictionary<string, string> row in tableHandle.SelectAllOrderedBy(safepointController, "height", false))
+				{
+					Assert.NotNull(row);
+					if (++count == 6)
+					{
+						Assert.AreEqual("vnch-chan", row["name"]);
+						Assert.AreEqual("2", row["id"]);
+						Assert.AreEqual("155", row["height"]);
+					}
+					else
+					{
+						Assert.AreEqual(7, count);
+						Assert.AreEqual("hillary-clinton", row["name"]);
+						Assert.AreEqual("3", row["id"]);
+						Assert.AreEqual("210", row["height"]);
+					}
+				}
 				return false;
 			});
 		}

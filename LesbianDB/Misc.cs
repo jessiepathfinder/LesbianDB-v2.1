@@ -15,6 +15,7 @@ using LesbianDB.Optimism.Core;
 using System.Numerics;
 using System.Diagnostics.CodeAnalysis;
 using System.Collections;
+using System.Runtime.CompilerServices;
 
 namespace LesbianDB
 {
@@ -274,6 +275,26 @@ namespace LesbianDB
 			random = temp;
 		finish:
 			return temp.Next(from, to);
+		}
+		public static string GetChildKey(string parent, string key)
+		{
+			int len = parent.Length;
+			Span<byte> hash = stackalloc byte[48];
+			int longlen = (len + key.Length + 2) * 2;
+			using (PooledMemoryStream pooledMemoryStream = new PooledMemoryStream(arrayPool, longlen)){
+				Span<byte> sliced = hash.Slice(0, 4);
+				BinaryPrimitives.WriteInt32BigEndian(sliced, len);
+				pooledMemoryStream.Write(sliced);
+				pooledMemoryStream.Write(MemoryMarshal.AsBytes(parent.AsSpan()));
+				pooledMemoryStream.Write(MemoryMarshal.AsBytes(key.AsSpan()));
+				using SHA384 sha384 = SHA384.Create();
+				sha384.TryComputeHash(pooledMemoryStream.GetBuffer().AsSpan(0, longlen), hash, out _);
+			}
+
+			return Convert.ToBase64String(hash.Slice(0, 32), Base64FormattingOptions.None);
+		}
+		public static FastMultiAwaiter GetAwaiter(this Task[] tasks){
+			return new FastMultiAwaiter(tasks);
 		}
 	}
 	public sealed class ObjectDamagedException : Exception
