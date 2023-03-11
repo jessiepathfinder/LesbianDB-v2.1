@@ -1,4 +1,4 @@
-# LesbianDB v2.1: high-performance, ACID-compilant NoSQL database
+# Yuri: high-performance, ACID-compilant NoSQL database (formerly LesbianDB)
 
 ## Getting started
 
