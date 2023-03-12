@@ -33,7 +33,16 @@ namespace LesbianDB.Optimism.Core
 	/// An optimistic fault that causes the optimistic execution manager to revert and restart the transaction
 	/// </summary>
 	public sealed class OptimisticFault : Exception{
-		
+		private static volatile int counter;
+		private readonly int hash = Interlocked.Increment(ref counter);
+		public override int GetHashCode()
+		{
+			return hash;
+		}
+		public override bool Equals(object obj)
+		{
+			return ReferenceEquals(this, obj);
+		}
 	}
 	public interface IOptimisticExecutionManager{
 		public Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction);
@@ -520,9 +529,12 @@ namespace LesbianDB.Optimism.Core
 			{
 				result = await optimisticFunction(nestedOptimisticExecutioner);
 			}
-			catch (OptimisticFault)
+			catch (OptimisticFault optimisticFault)
 			{
-				goto start;
+				if(nestedOptimisticExecutioner.knownOptimisticFaults.ContainsKey(optimisticFault)){
+					goto start;
+				}
+				throw;
 			}
 			catch
 			{
@@ -572,6 +584,7 @@ namespace LesbianDB.Optimism.Core
 			private readonly IOptimisticExecutionScope optimisticExecutionScope;
 			public readonly ConcurrentDictionary<string, string> writes = new ConcurrentDictionary<string, string>();
 			public readonly ConcurrentDictionary<string, string> reads = new ConcurrentDictionary<string, string>();
+			public readonly ConcurrentDictionary<OptimisticFault, bool> knownOptimisticFaults = new ConcurrentDictionary<OptimisticFault, bool>();
 
 			public NestedOptimisticExecutioner(IOptimisticExecutionScope optimisticExecutionScope)
 			{
@@ -615,7 +628,9 @@ namespace LesbianDB.Optimism.Core
 						}
 						continue;
 					}
-					throw new OptimisticFault();
+					OptimisticFault exception = new OptimisticFault();
+					knownOptimisticFaults.TryAdd(exception, false);
+					throw exception;
 				}
 
 				return output;
