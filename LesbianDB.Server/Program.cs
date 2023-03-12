@@ -22,8 +22,6 @@ namespace LesbianDB.Server
 			public string Listen { get; set; }
 			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd/kellyanne)")]
 			public string Engine { get; set; }
-			[Option("purrfectodd.flushinginterval", Required = false, HelpText = "Tells PurrfectODD to flush all writes to disk every N microseconds", Default = 30000)]
-			public int PurrfectODDFlushingInterval { get; set; }
 			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd, optional for saskia, have no effect for yuri/kellyanne)")]
 			public string PersistDir { get; set; }
 			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability (no effect for kellyanne storage engine).")]
@@ -278,7 +276,7 @@ namespace LesbianDB.Server
 					IFlushableAsyncDictionary flushableAsyncDictionary = new PurrfectODD(persistdir, mallocator is null ? (() => new ShardedAsyncDictionary(factory, options.EphemeralSaskiaBucketsCount, memory)) : (Func<IAsyncDictionary>)(() => new LargeDataOffloader(new ShardedAsyncDictionary(factory, options.EphemeralSaskiaBucketsCount, memory), mallocator, compressionLevel)), out load);
 					IFlushableAsyncDictionary cached = options.NoReadCache ? flushableAsyncDictionary : new RandomReplacementWriteThroughCache(flushableAsyncDictionary, memory);
 					if(binlog is null){
-						databaseEngine = new YuriDatabaseEngine(cached, options.PurrfectODDFlushingInterval);
+						databaseEngine = new YuriDatabaseEngine(cached, true);
 					} else{
 						Task load2 = load;
 						async Task func()
@@ -287,7 +285,7 @@ namespace LesbianDB.Server
 							await SmartRestoreBinlog(flushableAsyncDictionary, binlog, options.ClearBinlog);
 						}
 						load = func();
-						databaseEngine = new YuriDatabaseEngine(cached, binlog, true, options.PurrfectODDFlushingInterval);
+						databaseEngine = new YuriDatabaseEngine(cached, binlog, true, true);
 					}
 					asyncDictionary = cached;
 					getDatabaseEngine = null;

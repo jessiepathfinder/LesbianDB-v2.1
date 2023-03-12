@@ -296,6 +296,58 @@ namespace LesbianDB
 		public static FastMultiAwaiter GetAwaiter(this Task[] tasks){
 			return new FastMultiAwaiter(tasks);
 		}
+
+		private static readonly ConcurrentBag<WeakReference<AsyncManagedSemaphore>> GCListenersActivationQueue = new ConcurrentBag<WeakReference<AsyncManagedSemaphore>>();
+		public static void RegisterGCListenerSemaphore(AsyncManagedSemaphore asyncManagedSemaphore){
+			GCListenersActivationQueue.Add(new WeakReference<AsyncManagedSemaphore>(asyncManagedSemaphore, false));
+		}
+		private static void GCMonitorThread(){
+			
+			GC.RegisterForFullGCNotification(99, 99);
+			Queue<WeakReference<AsyncManagedSemaphore>> GCListeners = new Queue<WeakReference<AsyncManagedSemaphore>>();
+			while (true){
+				GCNotificationStatus status = GC.WaitForFullGCApproach();
+				if (status == GCNotificationStatus.Succeeded)
+				{
+					Queue<WeakReference<AsyncManagedSemaphore>> newqueue = new Queue<WeakReference<AsyncManagedSemaphore>>();
+					while(GCListeners.TryDequeue(out WeakReference<AsyncManagedSemaphore> weakReference)){
+						if(weakReference.TryGetTarget(out AsyncManagedSemaphore asyncManagedSemaphore)){
+							asyncManagedSemaphore.Exit();
+							newqueue.Enqueue(weakReference);
+						}
+					}
+					GCListeners = newqueue;
+				} else{
+					if(status == GCNotificationStatus.Canceled){
+						return;
+					}
+					throw new Exception("Unable to wait for GC approach notification (should not reach here)");
+				}
+				status = GC.WaitForFullGCComplete();
+				if (status == GCNotificationStatus.Succeeded)
+				{
+					while(GCListenersActivationQueue.TryTake(out WeakReference<AsyncManagedSemaphore> weakReference)){
+						if(weakReference.TryGetTarget(out _)){
+							GCListeners.Enqueue(weakReference);
+						}
+					}
+				}
+				else
+				{
+					if (status == GCNotificationStatus.Canceled)
+					{
+						return;
+					}
+					throw new Exception("Unable to wait for GC completion notification (should not reach here)");
+				}
+			}
+		}
+		static Misc(){
+			Thread thread = new Thread(GCMonitorThread);
+			thread.Name = "LesbianDB GC monitoring thread";
+			thread.IsBackground = true;
+			thread.Start();
+		}
 	}
 	public sealed class ObjectDamagedException : Exception
 	{

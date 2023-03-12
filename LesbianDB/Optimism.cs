@@ -45,9 +45,10 @@ namespace LesbianDB.Optimism.Core
 
 		private readonly ConcurrentXHashMap<string>[] optimisticCachePartitions = new ConcurrentXHashMap<string>[256];
 		private static async void Collect(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit){
+			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
+			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await Task.Delay(Misc.FastRandom(1, 300));
-			
+			await asyncManagedSemaphore.Enter();
 			if(weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] optimisticCachePartitions)){
 				if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
 				{
@@ -95,7 +96,7 @@ namespace LesbianDB.Optimism.Core
 					IReadOnlyDictionary<string, string> state = optimisticExecutionScope.barrierReads ?? await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys(readCache.ToArray()), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
 					foreach(KeyValuePair<string, string> keyValuePair in state){
 						string key = keyValuePair.Key;
-						optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair.Value;
+						optimisticCachePartitions[(key + "ASMR Lesbian Neck Kissing").GetHashCode() & 255][key] = keyValuePair.Value;
 					}
 					readCache = new ConcurrentDictionary<string, string>(state);
 					continue;
@@ -150,7 +151,7 @@ namespace LesbianDB.Optimism.Core
 					foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs1)
 					{
 						string key = keyValuePair1.Key;
-						optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
+						optimisticCachePartitions[(key + "ASMR Lesbian Neck Kissing").GetHashCode() & 255][key] = keyValuePair1.Value;
 					}
 					readCache = new ConcurrentDictionary<string, string>(reads);
 				} else{
@@ -159,15 +160,7 @@ namespace LesbianDB.Optimism.Core
 						foreach (KeyValuePair<string, string> keyValuePair1 in writeCache)
 						{
 							string key = keyValuePair1.Key;
-							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
-						}
-						foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs1)
-						{
-							string key = keyValuePair1.Key;
-							if(writeCache.ContainsKey(key)){
-								continue;
-							}
-							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
+							optimisticCachePartitions[(key + "ASMR Lesbian Neck Kissing").GetHashCode() & 255][key] = keyValuePair1.Value;
 						}
 						return ret;
 					}
@@ -229,7 +222,7 @@ namespace LesbianDB.Optimism.Core
 					}
 					return value1;
 				}
-				ConcurrentXHashMap<string> cacheBucket = optimisticCachePartitions[key.GetHashCode() & 255];
+				ConcurrentXHashMap<string> cacheBucket = optimisticCachePartitions[(key + "ASMR Lesbian Neck Kissing").GetHashCode() & 255];
 				Hash256 hash = new Hash256(key);
 				if(cacheBucket.TryGetValue(hash, out value1)){
 					value1 = readcache.GetOrAdd(key, value1);
@@ -302,7 +295,7 @@ namespace LesbianDB.Optimism.Core
 							reads.Add(key, value);
 						}
 					}
-					optimisticCachePartitions[key.GetHashCode() & 255][key] = value;
+					optimisticCachePartitions[(key + "ASMR Lesbian Neck Kissing").GetHashCode() & 255][key] = value;
 					
 				}
 				if(success){

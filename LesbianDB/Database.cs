@@ -101,22 +101,32 @@ namespace LesbianDB
 			binlogLock = new AsyncMutex();
 			InitLocks();
 		}
-		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, int flushingInterval) : this(asyncDictionary)
+		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, bool doflush) : this(asyncDictionary)
 		{
-			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false), flushingInterval);
+			if(doflush){
+				SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false));
+			}
 		}
-		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, Stream binlog, int flushingInterval) : this(asyncDictionary, binlog)
+		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, Stream binlog, bool doflush) : this(asyncDictionary, binlog)
 		{
-			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false), flushingInterval);
+			if (doflush)
+			{
+				SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false));
+			}
 		}
-		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, Stream binlog, bool writefastrecover, int flushingInterval) : this(asyncDictionary, binlog, writefastrecover)
+		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, Stream binlog, bool writefastrecover, bool doflush) : this(asyncDictionary, binlog, writefastrecover)
 		{
-			SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false), flushingInterval);
+			if (doflush)
+			{
+				SelfFlushingLoop(new WeakReference<YuriDatabaseEngine>(this, false));
+			}
 		}
-		private static async void SelfFlushingLoop(WeakReference<YuriDatabaseEngine> weakReference, int flushingInterval){
+		private static async void SelfFlushingLoop(WeakReference<YuriDatabaseEngine> weakReference){
+			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
+			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await Task.Delay(flushingInterval);
-			if(weakReference.TryGetTarget(out YuriDatabaseEngine yuriDatabaseEngine)){
+			await asyncManagedSemaphore.Enter();
+			if (weakReference.TryGetTarget(out YuriDatabaseEngine yuriDatabaseEngine)){
 				await yuriDatabaseEngine.flushLock.AcquireWriterLock();
 				try{
 					await ((IFlushableAsyncDictionary)yuriDatabaseEngine.asyncDictionary).Flush();

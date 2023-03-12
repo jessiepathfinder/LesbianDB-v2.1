@@ -424,9 +424,11 @@ namespace LesbianDB
 			cache[Misc.FastRandom(0, 256)].Clear();
 		}
 		private static async void EvictionThread(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit){
+			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
+			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await Task.Delay(Misc.FastRandom(1, 300));
-			if(weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] cache)){
+			await asyncManagedSemaphore.Enter();
+			if (weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] cache)){
 				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
 					RandomEvict(cache);
 				}

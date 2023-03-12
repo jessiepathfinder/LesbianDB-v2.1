@@ -189,8 +189,10 @@ namespace LesbianDB
 			}
 		}
 		private static async void Collect(WeakReference<CachedAsyncDictionary> weakReference){
+			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
+			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await Task.Delay(Misc.FastRandom(1, 300));
+			await asyncManagedSemaphore.Enter();
 			if (weakReference.TryGetTarget(out CachedAsyncDictionary _this)){
 				if(Misc.thisProcess.VirtualMemorySize64 < _this.softMemoryLimit){
 					//No cache eviction until we hit memory limit
