@@ -340,9 +340,6 @@ namespace LesbianDB
 					{
 						return;
 					}
-					if(status == GCNotificationStatus.NotApplicable){
-						continue;
-					}
 					throw new Exception("Unable to wait for GC completion notification (should not reach here)");
 				}
 			}

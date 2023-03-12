@@ -451,6 +451,11 @@ namespace LesbianDB.Tests
 						Assert.AreEqual("210", row["height"]);
 					}
 				}
+				await tableHandle.DeleteAllRows(safepointController);
+				await foreach (IReadOnlyDictionary<string, string> row in tableHandle.SelectAllOrderedBy(safepointController, "height", false))
+				{
+					Assert.Fail();
+				}
 				return false;
 			});
 		}

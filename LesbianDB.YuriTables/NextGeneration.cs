@@ -964,14 +964,22 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 				sortedSetHandle = temp;
 				goto start;
 			}
-			throw new InvalidOperationException("Enumeration is only supported for tables with b-tree indexes");
+			throw new InvalidOperationException("Enumeration is only supported for tables with sorted int columns");
 		start:
 			IAsyncEnumerable<SortedSetReadResult> sortedSetReadResults = sortedSetHandle.SelectAll(safepointController, false);
 			if (isPrimary){
+				NestedTransactionsManager nestedTransactionsManager = new NestedTransactionsManager(optimisticExecutionScope);
+				Queue<Task> tasks = new Queue<Task>();
+				TableHandle me = this;
 				await foreach (SortedSetReadResult sortedSetReadResult in sortedSetReadResults)
 				{
-					await UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
+					tasks.Enqueue(nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
+					{
+						await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
+						return false;
+					}));
 				}
+				await tasks.ToArray();
 			} else{
 				Queue<Task> tasks = new Queue<Task>();
 				await foreach (SortedSetReadResult sortedSetReadResult in sortedSetReadResults)
@@ -999,20 +1007,32 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			}
 
 			IAsyncEnumerable<SortedSetReadResult> sortedSetReadResults = sortedSetHandle.Select(safepointController, compareOperator, bigInteger, false);
+			NestedTransactionsManager nestedTransactionsManager = new NestedTransactionsManager(optimisticExecutionScope);
+			TableHandle me = this;
+			async Task<bool> Kernel(IOptimisticExecutionScope child, string id){
+				await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).UpdateIntImpl(id, targetColumn, value, sortedSetHandle1);
+				return false;
+			}
+			
 			if (samecol){
 				Queue<string> keys = new Queue<string>();
 				await foreach (SortedSetReadResult sortedSetReadResult in sortedSetReadResults)
 				{
 					keys.Enqueue(sortedSetReadResult.key);
 				}
+				Task[] tasks = new Task[keys.Count];
 				while(keys.TryDequeue(out string key)){
-					await UpdateIntImpl(key, targetColumn, value, sortedSetHandle1);
+					tasks[keys.Count] = nestedTransactionsManager.ExecuteOptimisticFunction((IOptimisticExecutionScope child) => Kernel(child, key));
 				}
+				await tasks;
 			} else{
+				Queue<Task> tasks = new Queue<Task>();
 				await foreach (SortedSetReadResult sortedSetReadResult in sortedSetReadResults)
 				{
-					await UpdateIntImpl(sortedSetReadResult.key, targetColumn, value, sortedSetHandle1);
+					string key = sortedSetReadResult.key;
+					tasks.Enqueue(nestedTransactionsManager.ExecuteOptimisticFunction((IOptimisticExecutionScope child) => Kernel(child, key)));
 				}
+				await tasks.ToArray();
 			}
 		}
 		public async Task UpdateMultipleRows(SafepointController safepointController, string column, BigInteger bigInteger, CompareOperator compareOperator, string targetColumn, string value){
@@ -1038,10 +1058,18 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			IAsyncEnumerable<SortedSetReadResult> sortedSetReadResults = sortedSetHandle.Select(safepointController, compareOperator, bigInteger, false);
 			if (isPrimary)
 			{
+				NestedTransactionsManager nestedTransactionsManager = new NestedTransactionsManager(optimisticExecutionScope);
+				Queue<Task> tasks = new Queue<Task>();
+				TableHandle me = this;
 				await foreach (SortedSetReadResult sortedSetReadResult in sortedSetReadResults)
 				{
-					await UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
+					tasks.Enqueue(nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
+					{
+						await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
+						return false;
+					}));
 				}
+				await tasks.ToArray();
 			}
 			else
 			{
@@ -1154,6 +1182,56 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 				throw new InvalidOperationException("This primary key does not exist");
 			}
 			await DeleteImpl(id);
+		}
+		public async Task DeleteMultipleRows(SafepointController safepointController, string column, BigInteger bigInteger, CompareOperator compareOperator)
+		{
+			if (!bTreeIndexes.TryGetValue(column, out SortedSetHandle sortedSetHandle))
+			{
+				throw new InvalidOperationException("This operation is only valid for sorted int rows");
+			}
+			Queue<string> queue = new Queue<string>();
+			await foreach(SortedSetReadResult sortedSetReadResult in sortedSetHandle.Select(safepointController, compareOperator, bigInteger, false)){
+				queue.Enqueue(sortedSetReadResult.key);
+			}
+			NestedTransactionsManager nestedTransactionsManager = new NestedTransactionsManager(optimisticExecutionScope);
+			Task[] tasks = new Task[queue.Count];
+			TableHandle me = this;
+			while(queue.TryDequeue(out string id)){
+				tasks[queue.Count] = nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
+				{
+					await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).DeleteImpl(id);
+					return false;
+				});
+			}
+			await tasks;
+		}
+		public async Task DeleteAllRows(SafepointController safepointController)
+		{
+			SortedSetHandle sortedSetHandle;
+			foreach (SortedSetHandle temp in bTreeIndexes.Values)
+			{
+				sortedSetHandle = temp;
+				goto start;
+			}
+			throw new InvalidOperationException("Enumeration is only supported for tables with sorted int columns");
+		start:
+			Queue<string> queue = new Queue<string>();
+			await foreach (SortedSetReadResult sortedSetReadResult in sortedSetHandle.SelectAll(safepointController, false))
+			{
+				queue.Enqueue(sortedSetReadResult.key);
+			}
+			NestedTransactionsManager nestedTransactionsManager = new NestedTransactionsManager(optimisticExecutionScope);
+			Task[] tasks = new Task[queue.Count];
+			TableHandle me = this;
+			while (queue.TryDequeue(out string id))
+			{
+				tasks[queue.Count] = nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
+				{
+					await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).DeleteImpl(id);
+					return false;
+				});
+			}
+			await tasks;
 		}
 	}
 	public readonly struct TryGetRowResult{
