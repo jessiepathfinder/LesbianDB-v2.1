@@ -321,7 +321,9 @@ namespace LesbianDB
 					if(status == GCNotificationStatus.Canceled){
 						return;
 					}
-					throw new Exception("Unable to wait for GC approach notification (should not reach here)");
+					if(status != GCNotificationStatus.NotApplicable){
+						throw new Exception("Unable to wait for GC approach notification (should not reach here)");
+					}
 				}
 				status = GC.WaitForFullGCComplete();
 				if (status == GCNotificationStatus.Succeeded)
@@ -337,6 +339,9 @@ namespace LesbianDB
 					if (status == GCNotificationStatus.Canceled)
 					{
 						return;
+					}
+					if(status == GCNotificationStatus.NotApplicable){
+						continue;
 					}
 					throw new Exception("Unable to wait for GC completion notification (should not reach here)");
 				}
