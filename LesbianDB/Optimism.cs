@@ -512,7 +512,7 @@ namespace LesbianDB.Optimism.Core
 		public IOptimisticExecutionScope GetParent();
 	}
 	public sealed class NestedTransactionsManager : IOptimisticExecutionManager{
-		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
+		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock(true);
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
 
 		public NestedTransactionsManager(IOptimisticExecutionScope optimisticExecutionScope)
