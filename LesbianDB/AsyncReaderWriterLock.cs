@@ -23,12 +23,12 @@ namespace LesbianDB
 		private long _readerCount;
 
 		public async Task AcquireUpgradeableReadLock(){
-			await AcquireReaderLock();
 			await upgradableReader.Enter();
+			await AcquireReaderLock();
 		}
 		public void ReleaseUpgradeableReadLock(){
-			upgradableReader.Exit();
 			ReleaseReaderLock();
+			upgradableReader.Exit();
 		}
 		public async Task UpgradeToWriteLock(){
 			await writer.Enter();
@@ -38,8 +38,8 @@ namespace LesbianDB
 		}
 		public void FullReleaseUpgradedLock()
 		{
-			upgradableReader.Exit();
 			ReleaseWriterLock();
+			upgradableReader.Exit();
 		}
 
 		public async Task AcquireWriterLock()

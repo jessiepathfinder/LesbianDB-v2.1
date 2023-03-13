@@ -512,7 +512,7 @@ namespace LesbianDB.Optimism.Core
 		public IOptimisticExecutionScope GetParent();
 	}
 	public sealed class NestedTransactionsManager : IOptimisticExecutionManager{
-		private readonly AsyncMutex asyncMutex = new AsyncMutex();
+		private readonly AsyncReaderWriterLock asyncReaderWriterLock = new AsyncReaderWriterLock();
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
 
 		public NestedTransactionsManager(IOptimisticExecutionScope optimisticExecutionScope)
@@ -527,7 +527,13 @@ namespace LesbianDB.Optimism.Core
 			T result;
 			try
 			{
-				result = await optimisticFunction(nestedOptimisticExecutioner);
+				await asyncReaderWriterLock.AcquireReaderLock();
+				try{
+					result = await optimisticFunction(nestedOptimisticExecutioner);
+				} finally{
+					asyncReaderWriterLock.ReleaseReaderLock();
+				}
+				
 			}
 			catch (OptimisticFault optimisticFault)
 			{
@@ -539,7 +545,7 @@ namespace LesbianDB.Optimism.Core
 			catch
 			{
 				KeyValuePair<string, string>[] keyValuePairs = nestedOptimisticExecutioner.reads.ToArray();
-				await asyncMutex.Enter();
+				await asyncReaderWriterLock.AcquireReaderLock();
 				try
 				{
 					foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs)
@@ -553,12 +559,13 @@ namespace LesbianDB.Optimism.Core
 				}
 				finally
 				{
-					asyncMutex.Exit();
+					asyncReaderWriterLock.ReleaseReaderLock();
 				}
 				throw;
 			}
 			KeyValuePair<string, string>[] keyValuePairs1 = nestedOptimisticExecutioner.reads.ToArray();
-			await asyncMutex.Enter();
+			bool upgraded = false;
+			await asyncReaderWriterLock.AcquireUpgradeableReadLock();
 			try
 			{
 				foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs1)
@@ -569,13 +576,19 @@ namespace LesbianDB.Optimism.Core
 					}
 					goto start;
 				}
+				await asyncReaderWriterLock.UpgradeToWriteLock();
+				upgraded = true;
 				foreach(KeyValuePair<string, string> keyValuePair1 in nestedOptimisticExecutioner.writes){
 					optimisticExecutionScope.Write(keyValuePair1.Key, keyValuePair1.Value);
 				}
 			}
 			finally
 			{
-				asyncMutex.Exit();
+				if(upgraded){
+					asyncReaderWriterLock.FullReleaseUpgradedLock();
+				} else{
+					asyncReaderWriterLock.ReleaseWriterLock();
+				}
 			}
 			return result;
 		}
