@@ -50,6 +50,7 @@ namespace LesbianDB.Optimism.Core
 	public sealed class OptimisticExecutionManager : IOptimisticExecutionManager
 	{
 		private readonly IDatabaseEngine[] databaseEngines;
+		private readonly AsyncReaderWriterLock[] asyncReaderWriterLocks = new AsyncReaderWriterLock[65536];
 		private readonly int databaseEnginesCount;
 
 		private readonly ConcurrentXHashMap<string>[] optimisticCachePartitions = new ConcurrentXHashMap<string>[256];
@@ -75,109 +76,220 @@ namespace LesbianDB.Optimism.Core
 				throw new ArgumentOutOfRangeException("At least 1 database engine required");
 			}
 			for (int i = 0; i < 256; ){
+				asyncReaderWriterLocks[i] = new AsyncReaderWriterLock(true);
 				optimisticCachePartitions[i++] = new ConcurrentXHashMap<string>();
 			}
 			Collect(new WeakReference<ConcurrentXHashMap<string>[]>(optimisticCachePartitions, false), softMemoryLimit);
+			for (int i = 256; i < 65536;)
+			{
+				asyncReaderWriterLocks[i++] = new AsyncReaderWriterLock(true);
+			}
 			databaseEnginesCount = count;
 		}
 		public OptimisticExecutionManager(IDatabaseEngine databaseEngine, long softMemoryLimit) {
 			databaseEngines = new IDatabaseEngine[]{databaseEngine ?? throw new ArgumentNullException(nameof(databaseEngine))};
 			for (int i = 0; i < 256;)
 			{
+				asyncReaderWriterLocks[i] = new AsyncReaderWriterLock(true);
 				optimisticCachePartitions[i++] = new ConcurrentXHashMap<string>();
 			}
 			Collect(new WeakReference<ConcurrentXHashMap<string>[]>(optimisticCachePartitions, false), softMemoryLimit);
+			for (int i = 256; i < 65536;)
+			{
+				asyncReaderWriterLocks[i++] = new AsyncReaderWriterLock(true);
+			}
 		}
 
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction)
 		{
 			ConcurrentDictionary<string, string> readCache = new ConcurrentDictionary<string, string>();
+			Dictionary<ushort, bool> locks = new Dictionary<ushort, bool>();
 			Dictionary<string, bool> consistentReads = new Dictionary<string, bool>();
-			while(true){
+			IReadOnlyDictionary<string, string> reads;
+			List<ushort> orderedlocks = new List<ushort>();
+			IEnumerable<string> missingContendedKeys = null;
+			while (true){
 				OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(databaseEngines, readCache, consistentReads, optimisticCachePartitions);
 				T ret;
 				Exception failure;
-				try{
-					ret = await optimisticFunction(optimisticExecutionScope);
-					failure = null;
-				} catch(OptimisticFault)
-				{
-					IReadOnlyDictionary<string, string> state = optimisticExecutionScope.barrierReads ?? await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys(readCache.ToArray()), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
-					foreach(KeyValuePair<string, string> keyValuePair in state){
-						string key = keyValuePair.Key;
-						optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair.Value;
-					}
-					readCache = new ConcurrentDictionary<string, string>(state);
-					continue;
-				} catch (Exception e)
-				{
-					ret = default;
-					failure = e;
-				}
-				
-				KeyValuePair<string, string>[] keyValuePairs1 = readCache.ToArray();
-				Dictionary<string, string> keyValuePairs3 = new Dictionary<string, string>();
-				foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs1)
-				{
-					string key = keyValuePair1.Key;
-					if (optimisticExecutionScope.readFromCache.ContainsKey(key))
-					{
-						keyValuePairs3.Add(key, keyValuePair1.Value);
-					}
-				}
 				IReadOnlyDictionary<string, string> writeCache;
 				IReadOnlyDictionary<string, string> conditions;
-				if (failure is null){
-					KeyValuePair<string, string>[] keyValuePairs = optimisticExecutionScope.writecache.ToArray();
-					if (keyValuePairs.Length == 0)
+				KeyValuePair<string, string>[] keyValuePairs1;
+				Dictionary<string, string> keyValuePairs3;
+				int lockcount1 = locks.Count;
+				if(lockcount1 > orderedlocks.Count)
+				{
+					orderedlocks.Clear();
+					orderedlocks.Capacity = lockcount1;
+					foreach(ushort lockid in locks.Keys){
+						orderedlocks.Add(lockid);
+					}
+					orderedlocks.Sort();
+				}
+				bool upgraded = false;
+				Queue<AsyncReaderWriterLock> upgradeableLocks = new Queue<AsyncReaderWriterLock>();
+				foreach (ushort lockid in orderedlocks) {
+					AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[lockid];
+					if (locks[lockid]){
+						Task getlock = asyncReaderWriterLock.AcquireUpgradeableReadLock();
+						upgradeableLocks.Enqueue(asyncReaderWriterLock);
+						await getlock;
+					} else{
+						await asyncReaderWriterLock.AcquireReaderLock();
+					}
+				}
+				try
+				{
+					if(missingContendedKeys is { }){
+						foreach (KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(missingContendedKeys, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance)){
+							readCache.TryAdd(keyValuePair.Key, keyValuePair.Value);
+						}
+					}
+					try
+					{
+						ret = await optimisticFunction(optimisticExecutionScope);
+						failure = null;
+					}
+					catch (OptimisticFault)
+					{
+						IReadOnlyDictionary<string, string> state = optimisticExecutionScope.barrierReads ?? await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys(readCache.ToArray()), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
+						foreach (KeyValuePair<string, string> keyValuePair in state)
+						{
+							string key = keyValuePair.Key;
+							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair.Value;
+						}
+						readCache = new ConcurrentDictionary<string, string>(state);
+						continue;
+					}
+					catch (Exception e)
+					{
+						ret = default;
+						failure = e;
+					}
+
+					keyValuePairs1 = readCache.ToArray();
+					keyValuePairs3 = new Dictionary<string, string>();
+					foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs1)
+					{
+						string key = keyValuePair1.Key;
+						if (optimisticExecutionScope.readFromCache.ContainsKey(key))
+						{
+							keyValuePairs3.Add(key, keyValuePair1.Value);
+						}
+					}
+					
+					if (failure is null)
+					{
+						KeyValuePair<string, string>[] keyValuePairs = optimisticExecutionScope.writecache.ToArray();
+						if (keyValuePairs.Length == 0)
+						{
+							writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
+							conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
+						}
+						else
+						{
+							Dictionary<string, string> keyValuePairs2 = new Dictionary<string, string>();
+							foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs)
+							{
+								string key = keyValuePair.Key;
+								string value = keyValuePair.Value;
+								if (keyValuePairs3.TryGetValue(key, out string read))
+								{
+									if (value == read)
+									{
+										continue;
+									}
+								}
+								keyValuePairs2.Add(key, value);
+							}
+							if (keyValuePairs2.Count == 0)
+							{
+								writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
+								conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
+							}
+							else
+							{
+								conditions = keyValuePairs3;
+								writeCache = keyValuePairs2;
+							}
+
+						}
+					}
+					else
 					{
 						writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
 						conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
 					}
-					else
-					{
-						Dictionary<string, string> keyValuePairs2 = new Dictionary<string, string>();
-						foreach(KeyValuePair<string, string> keyValuePair in keyValuePairs){
-							string key = keyValuePair.Key;
-							string value = keyValuePair.Value;
-							if(keyValuePairs3.TryGetValue(key, out string read)){
-								if(value == read){
-									continue;
-								}
-							}
-							keyValuePairs2.Add(key, value);
+					if(writeCache.Count > 0){
+						while(upgradeableLocks.TryDequeue(out AsyncReaderWriterLock asyncReaderWriterLock)){
+							await asyncReaderWriterLock.UpgradeToWriteLock();
 						}
-						if(keyValuePairs2.Count == 0){
-							writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
-							conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
-						} else{
-							conditions = keyValuePairs3;
-							writeCache = keyValuePairs2;
-						}
-						
+						upgraded = true;
 					}
-				} else{
-					writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
-					conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
+					reads = await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys2(keyValuePairs1, keyValuePairs3), conditions, writeCache);
+				} finally{
+					if(upgraded){
+						if(upgradeableLocks.Count > 0)
+						{
+							throw new Exception("Partially upgraded locks (should not reach here)");
+						}
+						foreach(KeyValuePair<ushort, bool> keyValuePair in locks){
+							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
+							if(keyValuePair.Value){
+								asyncReaderWriterLock.FullReleaseUpgradedLock();
+							} else{
+								asyncReaderWriterLock.ReleaseReaderLock();
+							}
+						}
+					} else{
+						foreach (KeyValuePair<ushort, bool> keyValuePair in locks)
+						{
+							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
+							if (keyValuePair.Value)
+							{
+								asyncReaderWriterLock.ReleaseUpgradeableReadLock();
+							}
+							else
+							{
+								asyncReaderWriterLock.ReleaseReaderLock();
+							}
+						}
+					}
+
 				}
 				bool restart = false;
-				IReadOnlyDictionary<string, string> reads = await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys2(keyValuePairs1, keyValuePairs3), conditions, writeCache);
-				foreach(KeyValuePair<string, string> keyValuePair1 in keyValuePairs3)
+				Dictionary<string, bool> contendedKeys = new Dictionary<string, bool>();
+				foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs3)
 				{
-					if (reads[keyValuePair1.Key] == keyValuePair1.Value)
+					string key = keyValuePair1.Key;
+					if (reads[key] == keyValuePair1.Value)
 					{
 						continue;
+					}
+					contendedKeys.TryAdd(key, false);
+					ushort hashcode = (ushort)((key + "ASMR Lesbian French Kissing").GetHashCode() & 65535);
+					if(writeCache.ContainsKey(key)){
+						locks[hashcode] = true;
+					} else{
+						locks.TryAdd(hashcode, false);
 					}
 					restart = true;
 				}
 				if(restart)
 				{
-					foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs1)
+					ThreadPool.QueueUserWorkItem((object obj) =>
 					{
-						string key = keyValuePair1.Key;
-						optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
-					}
-					readCache = new ConcurrentDictionary<string, string>(reads);
+						foreach (KeyValuePair<string, string> keyValuePair1 in reads)
+						{
+							string key = keyValuePair1.Key;
+							if (contendedKeys.ContainsKey(key))
+							{
+								continue;
+							}
+							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
+						}
+					});
+					readCache = new ConcurrentDictionary<string, string>(GetUncontendedKeys(reads, contendedKeys));
 				} else{
 					if (failure is null)
 					{
@@ -212,6 +324,14 @@ namespace LesbianDB.Optimism.Core
 					}
 					ExceptionDispatchInfo.Throw(failure);
 				}
+			}
+		}
+		private static IEnumerable<KeyValuePair<string, string>> GetUncontendedKeys(IReadOnlyDictionary<string, string> allKeys, Dictionary<string, bool> contendedKeys){
+			foreach(KeyValuePair<string, string> keyValuePair in allKeys){
+				if(contendedKeys.ContainsKey(keyValuePair.Key)){
+					continue;
+				}
+				yield return keyValuePair;
 			}
 		}
 		private sealed class DontWantToAddException : Exception{
