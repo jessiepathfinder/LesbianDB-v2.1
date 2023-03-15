@@ -220,6 +220,7 @@ namespace LesbianDB
 			Dictionary<string, string> readResults = new Dictionary<string, string>();
 
 			bool upgraded = false;
+			bool upgrading = false;
 
 			//Acquire locks
 			foreach (ushort id in locks)
@@ -267,6 +268,7 @@ namespace LesbianDB
 					}
 				}
 				//Upgrade locks
+				upgrading = true;
 				foreach (ushort id in locks)
 				{
 					AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[id];
@@ -329,23 +331,37 @@ namespace LesbianDB
 			finally
 			{
 				try{
-					foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
-					{
-						AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
-						if (keyValuePair.Value)
+					if(upgraded){
+						foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 						{
-							if (upgraded)
+							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
+							if (keyValuePair.Value)
 							{
 								asyncReaderWriterLock.FullReleaseUpgradedLock();
-							} else{
-								asyncReaderWriterLock.ReleaseUpgradeableReadLock();
+							}
+							else
+							{
+								asyncReaderWriterLock.ReleaseReaderLock();
 							}
 						}
-						else
+					} else{
+						if(upgrading){
+							throw new Exception("Not all locks that should be upgraded got upgraded (should not reach here)");
+						}
+						foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
 						{
-							asyncReaderWriterLock.ReleaseReaderLock();
+							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
+							if (keyValuePair.Value)
+							{
+								asyncReaderWriterLock.ReleaseUpgradeableReadLock();
+							}
+							else
+							{
+								asyncReaderWriterLock.ReleaseReaderLock();
+							}
 						}
 					}
+					
 				} catch(Exception e){
 					++minDamagesHeight;
 					damages.Enqueue(e);

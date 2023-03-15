@@ -697,6 +697,42 @@ namespace LesbianDB.Tests
 			}
 		}
 		[Test]
+		public async Task ExtremeOptimisticLockingTorture(){
+			EnhancedSequentialAccessDictionary dict = new EnhancedSequentialAccessDictionary();
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(dict), long.MaxValue);
+			TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>();
+			TaskCompletionSource<bool> taskCompletionSource2 = new TaskCompletionSource<bool>();
+			int atomctr = 0;
+			Task task = taskCompletionSource.Task;
+			Task[] tasks = new Task[256];
+			for(int i = 0; i < 256; ++i){
+				tasks[i] = optimisticExecutionManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope optimisticExecutionScope) =>
+				{
+					Task[] tasks1 = new Task[256];
+					NestedTransactionsManager nestedTransactionsManager = new NestedTransactionsManager(optimisticExecutionScope);
+					for (int x = 0; x < 256; ++x)
+					{
+						tasks1[x] = nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
+						{
+							await IncrementOptimisticCounter(child);
+							if (Interlocked.Increment(ref atomctr) == 65536)
+							{
+								taskCompletionSource2.SetResult(true);
+							}
+							await task;
+							return false;
+						});
+					}
+					await tasks1;
+					return false;
+				});
+			}
+			await taskCompletionSource2.Task;
+			taskCompletionSource.SetResult(true);
+			await tasks;
+			Assert.AreEqual("65536", await dict.Read("counter"));
+		}
+		[Test]
 		public async Task ZRamSaskiaOptimismCounter()
 		{
 			EnhancedSequentialAccessDictionary dictionary = new EnhancedSequentialAccessDictionary();

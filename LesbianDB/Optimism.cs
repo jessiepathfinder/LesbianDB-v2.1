@@ -126,14 +126,13 @@ namespace LesbianDB.Optimism.Core
 					}
 					orderedlocks.Sort();
 				}
+				bool upgrading = false;
 				bool upgraded = false;
-				Queue<AsyncReaderWriterLock> upgradeableLocks = new Queue<AsyncReaderWriterLock>();
+				Dictionary<ushort, bool> upgradedLocks = new Dictionary<ushort, bool>();
 				foreach (ushort lockid in orderedlocks) {
 					AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[lockid];
 					if (locks[lockid]){
-						Task getlock = asyncReaderWriterLock.AcquireUpgradeableReadLock();
-						upgradeableLocks.Enqueue(asyncReaderWriterLock);
-						await getlock;
+						await asyncReaderWriterLock.AcquireUpgradeableReadLock();
 					} else{
 						await asyncReaderWriterLock.AcquireReaderLock();
 					}
@@ -220,28 +219,42 @@ namespace LesbianDB.Optimism.Core
 						writeCache = SafeEmptyReadOnlyDictionary<string, string>.instance;
 						conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
 					}
-					if(writeCache.Count > 0){
-						while(upgradeableLocks.TryDequeue(out AsyncReaderWriterLock asyncReaderWriterLock)){
-							await asyncReaderWriterLock.UpgradeToWriteLock();
+					
+					foreach(string key in writeCache.Keys){
+						ushort hash = (ushort)((key + "ASMR Lesbian French Kissing").GetHashCode() & 65535);
+						if(locks.TryGetValue(hash, out bool upgradeable)){
+							if(upgradeable){
+								upgradedLocks.TryAdd(hash, false);
+							}
 						}
-						upgraded = true;
 					}
+					upgrading = true;
+					foreach(ushort lockid in orderedlocks){
+						if(upgradedLocks.ContainsKey(lockid)){
+							await asyncReaderWriterLocks[lockid].UpgradeToWriteLock();
+						}
+					}
+					upgraded = true;
 					reads = await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys2(keyValuePairs1, keyValuePairs3), conditions, writeCache);
 				} finally{
 					if(upgraded){
-						if(upgradeableLocks.Count > 0)
-						{
-							throw new Exception("Partially upgraded locks (should not reach here)");
-						}
 						foreach(KeyValuePair<ushort, bool> keyValuePair in locks){
-							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
+							ushort hash = keyValuePair.Key;
+							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[hash];
 							if(keyValuePair.Value){
-								asyncReaderWriterLock.FullReleaseUpgradedLock();
+								if(upgradedLocks.ContainsKey(hash)){
+									asyncReaderWriterLock.FullReleaseUpgradedLock();
+								} else{
+									asyncReaderWriterLock.ReleaseUpgradeableReadLock();
+								}
 							} else{
 								asyncReaderWriterLock.ReleaseReaderLock();
 							}
 						}
 					} else{
+						if(upgrading){
+							throw new Exception("Not all locks that should be upgraded got upgraded (should not reach here)");
+						}
 						foreach (KeyValuePair<ushort, bool> keyValuePair in locks)
 						{
 							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
@@ -290,6 +303,7 @@ namespace LesbianDB.Optimism.Core
 						}
 					});
 					readCache = new ConcurrentDictionary<string, string>(GetUncontendedKeys(reads, contendedKeys));
+					missingContendedKeys = contendedKeys.Keys;
 				} else{
 					if (failure is null)
 					{
@@ -684,8 +698,15 @@ namespace LesbianDB.Optimism.Core
 				throw;
 			}
 			KeyValuePair<string, string>[] keyValuePairs1 = nestedOptimisticExecutioner.reads.ToArray();
+			KeyValuePair<string, string>[] keyValuePairs2 = nestedOptimisticExecutioner.writes.ToArray();
+			bool upgradeable = keyValuePairs2.Length > 0;
 			bool upgraded = false;
-			await asyncReaderWriterLock.AcquireUpgradeableReadLock();
+			bool upgrading = false;
+			if(upgradeable){
+				await asyncReaderWriterLock.AcquireUpgradeableReadLock();
+			} else{
+				await asyncReaderWriterLock.AcquireReaderLock();
+			}
 			try
 			{
 				foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs1)
@@ -696,18 +717,32 @@ namespace LesbianDB.Optimism.Core
 					}
 					goto start;
 				}
-				await asyncReaderWriterLock.UpgradeToWriteLock();
-				upgraded = true;
-				foreach(KeyValuePair<string, string> keyValuePair1 in nestedOptimisticExecutioner.writes){
-					optimisticExecutionScope.Write(keyValuePair1.Key, keyValuePair1.Value);
+				if(upgradeable){
+					upgrading = true;
+					await asyncReaderWriterLock.UpgradeToWriteLock();
+					upgraded = true;
+					foreach (KeyValuePair<string, string> keyValuePair1 in keyValuePairs2)
+					{
+						optimisticExecutionScope.Write(keyValuePair1.Key, keyValuePair1.Value);
+					}
 				}
 			}
 			finally
 			{
-				if(upgraded){
-					asyncReaderWriterLock.FullReleaseUpgradedLock();
+				if(upgradeable){
+					if (upgraded)
+					{
+						asyncReaderWriterLock.FullReleaseUpgradedLock();
+					}
+					else
+					{
+						if(upgrading){
+							throw new Exception("Unable to determine lock status (should not reach here)");
+						}
+						asyncReaderWriterLock.ReleaseUpgradeableReadLock();
+					}
 				} else{
-					asyncReaderWriterLock.ReleaseWriterLock();
+					asyncReaderWriterLock.ReleaseReaderLock();
 				}
 			}
 			return result;
