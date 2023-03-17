@@ -20,11 +20,11 @@ namespace LesbianDB.Server
 		{
 			[Option("listen", Required = true, HelpText = "The HTTP websocket prefix to listen to (e.g https://lesbiandb-eu.scalegrid.com/c160d449395b5fbe70fcd18cef59264b/)")]
 			public string Listen { get; set; }
-			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd/kellyanne)")]
+			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd/kellyanne/purrfectng)")]
 			public string Engine { get; set; }
-			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd, optional for saskia, have no effect for yuri/kellyanne)")]
+			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd/purrfectng, optional for saskia, have no effect for yuri/kellyanne)")]
 			public string PersistDir { get; set; }
-			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability (no effect for kellyanne storage engine).")]
+			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability (no effect for kellyanne/purrfectng storage engine).")]
 			public string Binlog{ get; set; }
 			[Option("soft-memory-limit", Required = false, HelpText = "The soft limit to memory usage (in bytes)", Default = 268435456)]
 			public long SoftMemoryLimit { get; set; }
@@ -39,7 +39,7 @@ namespace LesbianDB.Server
 			public int YuriBuckets { get; set; }
 			[Option("accelerated-swap-compression", Required = false, HelpText = "How should we use GPU-accelerated swap compression? disable: do not use GPU-accelerated YuriMalloc swap compression, zram: use GPU-accelerated memory compression as a replacement for swapping, zcache: hot data is stored in RAM uncompressed, warm data is stored in RAM compressed, and cold data is swapped to disk compressed. This feature requires NVIDIA CUDA compartiable GPUs.", Default = "disable")]
 			public string NVSwapCompression { get; set; }
-			[Option("saskia.zram", Required = false, HelpText = "Tells the Saskia storage engine to use (in-CPU) memory compression instead of YuriMalloc for swapping cold data (no effect if persist-dir is specified or yuri/leveldb storage engine is used). This still has effect for PurrfectODD since PurrfectODD uses saskia as it's cache.", Default = false)]
+			[Option("saskia.zram", Required = false, HelpText = "Tells the Saskia storage engine to use (in-CPU) memory compression instead of YuriMalloc for swapping cold data (no effect if persist-dir is specified or yuri/leveldb storage engine is used). This still has effect for PurrfectODD/PurrfectNG since they use saskia for caching.", Default = false)]
 			public bool SaskiaZram { get; set; }
 			[Option("saskia.ephemeralbucketscount", Required = false, HelpText = "How many buckets should Saskia use in ephemeral mode (PurrfectODD L2 cache or without --persist-dir)", Default = 65536)]
 			public int EphemeralSaskiaBucketsCount { get; set; }
@@ -129,7 +129,7 @@ namespace LesbianDB.Server
 			IDatabaseEngine databaseEngine;
 			Action closeLevelDB;
 			Stream binlog;
-			if(engine == "kellyanne"){
+			if(engine == "kellyanne" | engine == "purrfectng"){
 				binlog = null;
 			} else{
 				string binlogname = options.Binlog;
@@ -263,7 +263,8 @@ namespace LesbianDB.Server
 					bool saskiazram = options.SaskiaZram;
 					ISwapAllocator mallocator;
 					Func<IFlushableAsyncDictionary> factory = null;
-					if(options.SaskiaZram){
+					if(saskiazram)
+					{
 						factory = CreateCompressedAsyncDictionary;
 						compressionLevel = CompressionLevel.Optimal;
 						mallocator = null;
@@ -322,6 +323,36 @@ namespace LesbianDB.Server
 					lockfile = null;
 					finalFlush = null;
 					databaseEngine = new Kellyanne(redoLogShards, ephemeralStorageShards);
+					break;
+				case "purrfectng":
+					if (persistdir is null)
+					{
+						throw new Exception("--persist-dir is mandatory for PurrfectNG storage engine!");
+					}
+					bool saskiazram1 = options.SaskiaZram;
+					ISwapAllocator mallocator1;
+					Func<IFlushableAsyncDictionary> factory1 = null;
+					if (saskiazram1)
+					{
+						factory1 = CreateCompressedAsyncDictionary;
+						compressionLevel = CompressionLevel.Optimal;
+						mallocator1 = null;
+					}
+					else
+					{
+						mallocator1 = CreateYuriMalloc(options, comptype);
+						compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
+						factory1 = () => new EnhancedSequentialAccessDictionary(new EphemeralSwapHandle(mallocator1), compressionLevel);
+					}
+					long memory1 = options.SoftMemoryLimit;
+
+					load = null;
+					asyncDictionary = null;
+					getDatabaseEngine = null;
+					closeLevelDB = null;
+					lockfile = null;
+					finalFlush = null;
+					databaseEngine = new PurrfectNG(persistdir, mallocator1 is null ? new ShardedAsyncDictionary(factory1, options.EphemeralSaskiaBucketsCount, memory1) : (IAsyncDictionary)new LargeDataOffloader(new ShardedAsyncDictionary(factory1, options.EphemeralSaskiaBucketsCount, memory1), mallocator1, compressionLevel));
 					break;
 				default:
 					throw new Exception("Unknown storage engine: " + engine);

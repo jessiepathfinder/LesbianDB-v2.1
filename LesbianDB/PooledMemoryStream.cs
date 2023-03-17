@@ -3,6 +3,8 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace LesbianDB
 {
@@ -80,7 +82,7 @@ namespace LesbianDB
 				newpos += position;
 
 			} else if(origin == SeekOrigin.End){
-				newpos = size - newpos;
+				newpos = size + newpos;
 			}
 			if (newpos < 0)
 			{
@@ -124,6 +126,26 @@ namespace LesbianDB
 				myBuffer = tempbuffer;
 				arrayPool.Return(old);
 			}
+		}
+		public override void CopyTo(Stream destination, int bufferSize)
+		{
+			int remains = size - position;
+			if(remains > 1){
+				destination.Write(myBuffer, position, remains);
+				position = size;
+			}
+		}
+		public override Task CopyToAsync(Stream destination, int bufferSize, CancellationToken cancellationToken)
+		{
+			int remains = size - position;
+			if (remains > 1)
+			{
+				destination.Write(myBuffer, position, remains);
+				Task task = destination.WriteAsync(myBuffer, position, remains, cancellationToken);
+				position = size;
+				return task;
+			}
+			return Misc.completed;
 		}
 	}
 }

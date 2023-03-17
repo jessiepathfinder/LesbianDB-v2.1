@@ -13,6 +13,7 @@ using LesbianDB.Optimism.Armitage;
 using LesbianDB.Optimism.Snapshot;
 using LesbianDB.IntelliEX;
 using LesbianDB.Optimism.YuriTables.NextGeneration;
+using System.Text;
 
 namespace LesbianDB.Tests
 {
@@ -744,6 +745,31 @@ namespace LesbianDB.Tests
 				{
 					await dictionary.Flush();
 				}
+			}
+		}
+		[Test]
+		public async Task PurrfectNGOptimismCounter()
+		{
+			string tempdir = Misc.GetRandomFileName();
+			Directory.CreateDirectory(tempdir);
+			try{
+				await using (PurrfectNG purrfectNG = new PurrfectNG(tempdir, new EnhancedSequentialAccessDictionary())){
+					OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(purrfectNG, 0);
+					for (int i = 0; i < 128;)
+					{
+						Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+					}
+				}
+				await using (PurrfectNG purrfectNG = new PurrfectNG(tempdir, new EnhancedSequentialAccessDictionary()))
+				{
+					OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(purrfectNG, 0);
+					for (int i = 128; i < 256;)
+					{
+						Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+					}
+				}
+			} finally{
+				Directory.Delete(tempdir, true);
 			}
 		}
 		[Test]
