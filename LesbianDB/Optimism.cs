@@ -147,13 +147,31 @@ namespace LesbianDB.Optimism.Core
 					}
 					catch (OptimisticFault)
 					{
-						IReadOnlyDictionary<string, string> state = optimisticExecutionScope.barrierReads ?? await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys(readCache.ToArray()), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
-						foreach (KeyValuePair<string, string> keyValuePair in state)
+						KeyValuePair<string, string>[] keyValuePairs = readCache.ToArray();
+						IReadOnlyDictionary<string, string> state = optimisticExecutionScope.barrierReads ?? await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys(keyValuePairs), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
+						Queue<KeyValuePair<string, string>> newstate = new Queue<KeyValuePair<string, string>>();
+						Queue<string> contendedKeys2 = new Queue<string>();
+						foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs)
 						{
 							string key = keyValuePair.Key;
-							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair.Value;
+							string value = keyValuePair.Value;
+							if (state[key] == value)
+							{
+								newstate.Enqueue(keyValuePair);
+								continue;
+							}
+							if (optimisticExecutionScope.writecache.ContainsKey(key))
+							{
+								locks[key] = LockMode.Upgradeable;
+							}
+							else
+							{
+								locks.TryAdd(key, LockMode.Read);
+							}
+							contendedKeys2.Enqueue(key);
 						}
-						readCache = new ConcurrentDictionary<string, string>(state);
+						readCache = new ConcurrentDictionary<string, string>(newstate.ToArray());
+						contendedKeys1 = contendedKeys2.ToArray();
 						continue;
 					}
 					catch (Exception e)

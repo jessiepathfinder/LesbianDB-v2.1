@@ -59,10 +59,9 @@ namespace LesbianDB
 			await asyncReaderWriterLock.AcquireUpgradeableReadLock();
 			try
 			{
-				Exception ex1 = damage;
-				if (ex1 is { })
+				if (damage is { })
 				{
-					throw new ObjectDamagedException(ex1);
+					throw new Exception();
 				}
 				if (activationStatuses[hash])
 				{
@@ -72,10 +71,9 @@ namespace LesbianDB
 				upgrading = true;
 				await asyncReaderWriterLock.UpgradeToWriteLock();
 				upgraded = true;
-				Exception ex2 = damage;
-				if (ex2 is { })
+				if (damage is { })
 				{
-					throw new ObjectDamagedException(ex2);
+					throw new Exception();
 				}
 				while (true)
 				{
@@ -317,10 +315,9 @@ namespace LesbianDB
 				}
 			}
 			try{
-				Exception ex1 = damage;
-				if (ex1 is { })
+				if (damage is { })
 				{
-					throw new ObjectDamagedException(ex1);
+					throw new Exception();
 				}
 				foreach (string key in deduplicatedReads.Keys){
 					asyncReads.Add(key, asyncDictionary.Read(key));
@@ -343,10 +340,9 @@ namespace LesbianDB
 						await asyncReaderWriterLock.UpgradeToWriteLock();
 					}
 					upgraded = true;
-					Exception ex2 = damage;
-					if (ex2 is { })
+					if (damage is { })
 					{
-						throw new ObjectDamagedException(ex2);
+						throw new Exception();
 					}
 					if (blacklistingFileName is null){
 						Task[] tasks = new Task[serializedBinlogWrites.Count + writecount];
