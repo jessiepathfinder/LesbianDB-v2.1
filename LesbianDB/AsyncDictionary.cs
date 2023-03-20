@@ -222,6 +222,7 @@ namespace LesbianDB
 					}
 
 					await flushes.ToArray();
+					Misc.AttemptSecondGC();
 				}
 				finally
 				{

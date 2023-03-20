@@ -431,6 +431,7 @@ namespace LesbianDB
 			if (weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] cache)){
 				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
 					RandomEvict(cache);
+					Misc.AttemptSecondGC();
 				}
 				goto start;
 			}

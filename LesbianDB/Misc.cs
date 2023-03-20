@@ -301,47 +301,45 @@ namespace LesbianDB
 		public static void RegisterGCListenerSemaphore(AsyncManagedSemaphore asyncManagedSemaphore){
 			GCListenersActivationQueue.Add(new WeakReference<AsyncManagedSemaphore>(asyncManagedSemaphore, false));
 		}
+		private static volatile int doneSecondGC;
+		public static void AttemptSecondGC(){
+			if(Interlocked.Exchange(ref doneSecondGC, 1) == 0){
+				GC.Collect(0, GCCollectionMode.Forced, false, true);
+			}
+		}
 		private static void GCMonitorThread(){
 			
-			GC.RegisterForFullGCNotification(99, 99);
-			Queue<WeakReference<AsyncManagedSemaphore>> GCListeners = new Queue<WeakReference<AsyncManagedSemaphore>>();
+			Queue<WeakReference<AsyncManagedSemaphore>> GCListeners = null;
 			while (true){
-				GCNotificationStatus status = GC.WaitForFullGCApproach();
-				if (status == GCNotificationStatus.Succeeded)
+				if (AppDomain.CurrentDomain.IsFinalizingForUnload())
 				{
-					Queue<WeakReference<AsyncManagedSemaphore>> newqueue = new Queue<WeakReference<AsyncManagedSemaphore>>();
-					while(GCListeners.TryDequeue(out WeakReference<AsyncManagedSemaphore> weakReference)){
-						if(weakReference.TryGetTarget(out AsyncManagedSemaphore asyncManagedSemaphore)){
-							asyncManagedSemaphore.Exit();
-							newqueue.Enqueue(weakReference);
-						}
-					}
-					GCListeners = newqueue;
-				} else{
-					if(status == GCNotificationStatus.Canceled){
-						return;
-					}
-					if(status != GCNotificationStatus.NotApplicable){
-						throw new Exception("Unable to wait for GC approach notification (should not reach here)");
+					return;
+				}
+				do
+				{
+					GC.WaitForPendingFinalizers();
+				} while (Interlocked.Exchange(ref doneSecondGC, 0) == 1);
+				Queue<WeakReference<AsyncManagedSemaphore>> newqueue = new Queue<WeakReference<AsyncManagedSemaphore>>();
+				while (GCListenersActivationQueue.TryTake(out WeakReference<AsyncManagedSemaphore> weakReference)){
+					if(weakReference.TryGetTarget(out AsyncManagedSemaphore asyncManagedSemaphore)){
+						asyncManagedSemaphore.Exit();
+						newqueue.Enqueue(weakReference);
 					}
 				}
-				status = GC.WaitForFullGCComplete();
-				if (status == GCNotificationStatus.Succeeded)
-				{
-					while(GCListenersActivationQueue.TryTake(out WeakReference<AsyncManagedSemaphore> weakReference)){
-						if(weakReference.TryGetTarget(out _)){
-							GCListeners.Enqueue(weakReference);
-						}
+				if(GCListeners is null){
+					if(newqueue.Count > 0){
+						GCListeners = newqueue;
 					}
+					continue;
 				}
-				else
-				{
-					if (status == GCNotificationStatus.Canceled)
+				while(GCListeners.TryDequeue(out WeakReference<AsyncManagedSemaphore> weakReference)){
+					if (weakReference.TryGetTarget(out AsyncManagedSemaphore asyncManagedSemaphore))
 					{
-						return;
+						asyncManagedSemaphore.Exit();
+						newqueue.Enqueue(weakReference);
 					}
-					throw new Exception("Unable to wait for GC completion notification (should not reach here)");
 				}
+				GCListeners = newqueue;
 			}
 		}
 		static Misc(){

@@ -75,23 +75,17 @@ namespace LesbianDB
 				}
 			}
 		}
-		private void InitLocks(){
-			for(int i = 0; i < 65536; ){
-				asyncReaderWriterLocks[i++] = new AsyncReaderWriterLock(true);
-			}
-		}
+
 		private readonly IAsyncDictionary asyncDictionary;
 		private readonly bool writefastrecover;
 		public YuriDatabaseEngine(IAsyncDictionary asyncDictionary){
 			this.asyncDictionary = asyncDictionary ?? throw new ArgumentNullException(nameof(asyncDictionary));
-			InitLocks();
 		}
 		public YuriDatabaseEngine(IAsyncDictionary asyncDictionary, Stream binlog)
 		{
 			this.asyncDictionary = asyncDictionary ?? throw new ArgumentNullException(nameof(asyncDictionary));
 			this.binlog = binlog ?? throw new ArgumentNullException(nameof(binlog));
 			binlogLock = new AsyncMutex();
-			InitLocks();
 		}
 		public YuriDatabaseEngine(IAsyncDictionary asyncDictionary, Stream binlog, bool writefastrecover)
 		{
@@ -99,7 +93,6 @@ namespace LesbianDB
 			this.binlog = binlog ?? throw new ArgumentNullException(nameof(binlog));
 			this.writefastrecover = writefastrecover;
 			binlogLock = new AsyncMutex();
-			InitLocks();
 		}
 		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, bool doflush) : this(asyncDictionary)
 		{
@@ -130,6 +123,7 @@ namespace LesbianDB
 				await yuriDatabaseEngine.flushLock.AcquireWriterLock();
 				try{
 					await ((IFlushableAsyncDictionary)yuriDatabaseEngine.asyncDictionary).Flush();
+					Misc.AttemptSecondGC();
 				} finally{
 					yuriDatabaseEngine.flushLock.ReleaseWriterLock();
 				}
@@ -139,7 +133,7 @@ namespace LesbianDB
 		private readonly AsyncReaderWriterLock flushLock = new AsyncReaderWriterLock();
 		private readonly AsyncMutex binlogLock;
 		private readonly Stream binlog;
-		private readonly AsyncReaderWriterLock[] asyncReaderWriterLocks = new AsyncReaderWriterLock[65536];
+		private readonly VeryASMRLockingManager veryASMRLockingManager = new VeryASMRLockingManager();
 		private readonly ConcurrentQueue<Exception> damages = new ConcurrentQueue<Exception>();
 		private readonly AsyncReaderWriterLock damageCheckingLock = new AsyncReaderWriterLock();
 		private Exception binlogException;
@@ -153,7 +147,7 @@ namespace LesbianDB
 			byte[] binlog_buffer;
 			int binlog_writelen;
 			//Lock checking
-			Dictionary<ushort, bool> lockLevels = new Dictionary<ushort, bool>();
+			Dictionary<string, LockMode> lockLevels = new Dictionary<string, LockMode>();
 			bool write = writes.Count > 0;
 			bool conditional;
 			if(write){
@@ -165,10 +159,11 @@ namespace LesbianDB
 						conditional = false;
 						goto nowrite;
 					}
+					lockLevels.Add("LesbianDB_reserved_binlog_height", LockMode.Upgradeable);
 				}
-				foreach (KeyValuePair<string, string> keyValuePair in writes)
+				foreach (string key in writes.Keys)
 				{
-					lockLevels.TryAdd((ushort)(keyValuePair.Key.GetHashCode() & 65535), true);
+					lockLevels.Add(key, LockMode.Upgradeable);
 				}
 				if (binlog is null)
 				{
@@ -203,37 +198,36 @@ namespace LesbianDB
 		nowrite:
 			foreach (string str in reads)
 			{
-				lockLevels.TryAdd((ushort)(str.GetHashCode() & 65535), false);
+				lockLevels.TryAdd(str, LockMode.Read);
 			}
 			if(conditional){
-				foreach (KeyValuePair<string, string> keyValuePair in conditions)
+				foreach (string key in conditions.Keys)
 				{
-					lockLevels.TryAdd((ushort)(keyValuePair.Key.GetHashCode() & 65535), false);
+					lockLevels.TryAdd(key, LockMode.Read);
 				}
 			}
 			//Lock ordering
-			List<ushort> locks = lockLevels.Keys.ToList();
-			locks.Sort();
+			List<string> locks = lockLevels.Keys.ToList();
+			locks.Sort(LockOrderingComparer.instance);
 
 			//Pending reads
 			Dictionary<string, Task<string>> pendingReads = new Dictionary<string, Task<string>>();
 			Dictionary<string, string> readResults = new Dictionary<string, string>();
+			Queue<LockHandle> unlockingQueue = new Queue<LockHandle>();
+			Queue<LockHandle> upgradingQueue = new Queue<LockHandle>();
 
 			bool upgraded = false;
 			bool upgrading = false;
 
 			//Acquire locks
-			foreach (ushort id in locks)
+			foreach (string id in locks)
 			{
-				AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[id];
-				if (lockLevels[id])
-				{
-					await asyncReaderWriterLock.AcquireUpgradeableReadLock();
+				LockMode lockMode = lockLevels[id];
+				LockHandle lockHandle = await veryASMRLockingManager.Lock(id, lockMode);
+				if(lockMode == LockMode.Upgradeable){
+					upgradingQueue.Enqueue(lockHandle);
 				}
-				else
-				{
-					await asyncReaderWriterLock.AcquireReaderLock();
-				}
+				unlockingQueue.Enqueue(lockHandle);
 			}
 			await damageCheckingLock.AcquireReaderLock();
 			try
@@ -269,13 +263,8 @@ namespace LesbianDB
 				}
 				//Upgrade locks
 				upgrading = true;
-				foreach (ushort id in locks)
-				{
-					AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[id];
-					if (lockLevels[id])
-					{
-						await asyncReaderWriterLock.UpgradeToWriteLock();
-					}
+				while(upgradingQueue.TryDequeue(out LockHandle lockHandle)){
+					await lockHandle.UpgradeToWriteLock();
 				}
 				upgraded = true;
 
@@ -331,37 +320,12 @@ namespace LesbianDB
 			finally
 			{
 				try{
-					if(upgraded){
-						foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
-						{
-							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
-							if (keyValuePair.Value)
-							{
-								asyncReaderWriterLock.FullReleaseUpgradedLock();
-							}
-							else
-							{
-								asyncReaderWriterLock.ReleaseReaderLock();
-							}
-						}
-					} else{
-						if(upgrading){
-							throw new Exception("Not all locks that should be upgraded got upgraded (should not reach here)");
-						}
-						foreach (KeyValuePair<ushort, bool> keyValuePair in lockLevels)
-						{
-							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
-							if (keyValuePair.Value)
-							{
-								asyncReaderWriterLock.ReleaseUpgradeableReadLock();
-							}
-							else
-							{
-								asyncReaderWriterLock.ReleaseReaderLock();
-							}
-						}
+					if(upgrading ^ upgraded){
+						throw new Exception("Inconsistent lock upgrading (should not reach here)");
 					}
-					
+					while(unlockingQueue.TryDequeue(out LockHandle lockHandle)){
+						lockHandle.Dispose();
+					}
 				} catch(Exception e){
 					++minDamagesHeight;
 					damages.Enqueue(e);

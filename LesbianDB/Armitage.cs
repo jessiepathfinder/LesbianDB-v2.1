@@ -88,6 +88,7 @@ namespace LesbianDB.Optimism.Armitage
 			if (weakReference.TryGetTarget(out ConcurrentDictionary<string, SpeculativeExecutionResult>[] cache)){
 				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
 					cache[Misc.FastRandom(0, 256)].Clear();
+					Misc.AttemptSecondGC();
 				}
 				goto start;
 			}

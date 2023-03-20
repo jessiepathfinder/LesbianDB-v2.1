@@ -50,7 +50,6 @@ namespace LesbianDB.Optimism.Core
 	public sealed class OptimisticExecutionManager : IOptimisticExecutionManager
 	{
 		private readonly IDatabaseEngine[] databaseEngines;
-		private readonly AsyncReaderWriterLock[] asyncReaderWriterLocks = new AsyncReaderWriterLock[65536];
 		private readonly int databaseEnginesCount;
 
 		private readonly ConcurrentXHashMap<string>[] optimisticCachePartitions = new ConcurrentXHashMap<string>[256];
@@ -63,6 +62,7 @@ namespace LesbianDB.Optimism.Core
 				if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
 				{
 					optimisticCachePartitions[Misc.FastRandom(0, 256)].Clear();
+					Misc.AttemptSecondGC();
 				}
 				goto start;
 			}
@@ -76,72 +76,68 @@ namespace LesbianDB.Optimism.Core
 				throw new ArgumentOutOfRangeException("At least 1 database engine required");
 			}
 			for (int i = 0; i < 256; ){
-				asyncReaderWriterLocks[i] = new AsyncReaderWriterLock(true);
 				optimisticCachePartitions[i++] = new ConcurrentXHashMap<string>();
 			}
 			Collect(new WeakReference<ConcurrentXHashMap<string>[]>(optimisticCachePartitions, false), softMemoryLimit);
-			for (int i = 256; i < 65536;)
-			{
-				asyncReaderWriterLocks[i++] = new AsyncReaderWriterLock(true);
-			}
+
 			databaseEnginesCount = count;
 		}
 		public OptimisticExecutionManager(IDatabaseEngine databaseEngine, long softMemoryLimit) {
 			databaseEngines = new IDatabaseEngine[]{databaseEngine ?? throw new ArgumentNullException(nameof(databaseEngine))};
 			for (int i = 0; i < 256;)
 			{
-				asyncReaderWriterLocks[i] = new AsyncReaderWriterLock(true);
 				optimisticCachePartitions[i++] = new ConcurrentXHashMap<string>();
 			}
 			Collect(new WeakReference<ConcurrentXHashMap<string>[]>(optimisticCachePartitions, false), softMemoryLimit);
-			for (int i = 256; i < 65536;)
-			{
-				asyncReaderWriterLocks[i++] = new AsyncReaderWriterLock(true);
-			}
 		}
+		private readonly VeryASMRLockingManager veryASMRLockingManager = new VeryASMRLockingManager();
 
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction)
 		{
 			ConcurrentDictionary<string, string> readCache = new ConcurrentDictionary<string, string>();
-			Dictionary<ushort, bool> locks = new Dictionary<ushort, bool>();
-			Dictionary<string, bool> consistentReads = new Dictionary<string, bool>();
 			IReadOnlyDictionary<string, string> reads;
-			List<ushort> orderedlocks = new List<ushort>();
-			IEnumerable<string> missingContendedKeys = null;
+			Dictionary<string, LockMode> locks = new Dictionary<string, LockMode>();
+			List<string> sortedLockList = new List<string>();
+			IEnumerable<string> contendedKeys1 = null;
 			while (true){
-				OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(databaseEngines, readCache, consistentReads, optimisticCachePartitions);
+				OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(databaseEngines, readCache, optimisticCachePartitions);
 				T ret;
 				Exception failure;
 				IReadOnlyDictionary<string, string> writeCache;
 				IReadOnlyDictionary<string, string> conditions;
 				KeyValuePair<string, string>[] keyValuePairs1;
 				Dictionary<string, string> keyValuePairs3;
-				int lockcount1 = locks.Count;
-				if(lockcount1 > orderedlocks.Count)
-				{
-					orderedlocks.Clear();
-					orderedlocks.Capacity = lockcount1;
-					foreach(ushort lockid in locks.Keys){
-						orderedlocks.Add(lockid);
-					}
-					orderedlocks.Sort();
-				}
 				bool upgrading = false;
 				bool upgraded = false;
-				Dictionary<ushort, bool> upgradedLocks = new Dictionary<ushort, bool>();
-				foreach (ushort lockid in orderedlocks) {
-					AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[lockid];
-					if (locks[lockid]){
-						await asyncReaderWriterLock.AcquireUpgradeableReadLock();
-					} else{
-						await asyncReaderWriterLock.AcquireReaderLock();
+				Queue<LockHandle> unlockQueue = new Queue<LockHandle>();
+				Queue<LockHandle> upgradeQueue = new Queue<LockHandle>();
+				int locksCount = locks.Count;
+				if (locksCount > sortedLockList.Count){
+					sortedLockList.Clear();
+					if(locksCount > sortedLockList.Capacity){
+						sortedLockList.Capacity = locksCount * 2;
 					}
+					sortedLockList.AddRange(locks.Keys);
+					sortedLockList.Sort(LockOrderingComparer.instance);
+				}
+				foreach (string lockstr in sortedLockList)
+				{
+					LockMode lockMode = locks[lockstr];
+					LockHandle lockHandle = await veryASMRLockingManager.Lock(lockstr, lockMode);
+					if (lockMode == LockMode.Upgradeable)
+					{
+						upgradeQueue.Enqueue(lockHandle);
+					}
+					unlockQueue.Enqueue(lockHandle);
 				}
 				try
 				{
-					if(missingContendedKeys is { }){
-						foreach (KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(missingContendedKeys, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance)){
-							readCache.TryAdd(keyValuePair.Key, keyValuePair.Value);
+					if(contendedKeys1 is { })
+					{
+						foreach (KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(contendedKeys1, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance)){
+							string key = keyValuePair.Key;
+							string value = keyValuePair.Value;
+							readCache.TryAdd(key, value);
 						}
 					}
 					try
@@ -220,55 +216,21 @@ namespace LesbianDB.Optimism.Core
 						conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
 					}
 					
-					foreach(string key in writeCache.Keys){
-						ushort hash = (ushort)((key + "ASMR Lesbian French Kissing").GetHashCode() & 65535);
-						if(locks.TryGetValue(hash, out bool upgradeable)){
-							if(upgradeable){
-								upgradedLocks.TryAdd(hash, false);
-							}
-						}
-					}
+					
 					upgrading = true;
-					foreach(ushort lockid in orderedlocks){
-						if(upgradedLocks.ContainsKey(lockid)){
-							await asyncReaderWriterLocks[lockid].UpgradeToWriteLock();
-						}
+					while(upgradeQueue.TryDequeue(out LockHandle lockHandle)){
+						await lockHandle.UpgradeToWriteLock();
 					}
 					upgraded = true;
 					reads = await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(GetKeys2(keyValuePairs1, keyValuePairs3), conditions, writeCache);
 				} finally{
-					if(upgraded){
-						foreach(KeyValuePair<ushort, bool> keyValuePair in locks){
-							ushort hash = keyValuePair.Key;
-							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[hash];
-							if(keyValuePair.Value){
-								if(upgradedLocks.ContainsKey(hash)){
-									asyncReaderWriterLock.FullReleaseUpgradedLock();
-								} else{
-									asyncReaderWriterLock.ReleaseUpgradeableReadLock();
-								}
-							} else{
-								asyncReaderWriterLock.ReleaseReaderLock();
-							}
-						}
-					} else{
-						if(upgrading){
-							throw new Exception("Not all locks that should be upgraded got upgraded (should not reach here)");
-						}
-						foreach (KeyValuePair<ushort, bool> keyValuePair in locks)
-						{
-							AsyncReaderWriterLock asyncReaderWriterLock = asyncReaderWriterLocks[keyValuePair.Key];
-							if (keyValuePair.Value)
-							{
-								asyncReaderWriterLock.ReleaseUpgradeableReadLock();
-							}
-							else
-							{
-								asyncReaderWriterLock.ReleaseReaderLock();
-							}
-						}
+					if (upgrading ^ upgraded)
+					{
+						throw new Exception("Inconsistent lock upgrading (should not reach here)");
 					}
-
+					while(unlockQueue.TryDequeue(out LockHandle lockHandle)){
+						lockHandle.Dispose();
+					}
 				}
 				bool restart = false;
 				Dictionary<string, bool> contendedKeys = new Dictionary<string, bool>();
@@ -279,12 +241,11 @@ namespace LesbianDB.Optimism.Core
 					{
 						continue;
 					}
-					contendedKeys.TryAdd(key, false);
-					ushort hashcode = (ushort)((key + "ASMR Lesbian French Kissing").GetHashCode() & 65535);
-					if(writeCache.ContainsKey(key)){
-						locks[hashcode] = true;
+					contendedKeys.Add(key, false);
+					if (writeCache.ContainsKey(key)) {
+						locks[key] = LockMode.Upgradeable;
 					} else{
-						locks.TryAdd(hashcode, false);
+						locks.TryAdd(key, LockMode.Read);
 					}
 					restart = true;
 				}
@@ -303,7 +264,7 @@ namespace LesbianDB.Optimism.Core
 						}
 					});
 					readCache = new ConcurrentDictionary<string, string>(GetUncontendedKeys(reads, contendedKeys));
-					missingContendedKeys = contendedKeys.Keys;
+					contendedKeys1 = contendedKeys.Keys;
 				} else{
 					if (failure is null)
 					{
@@ -379,15 +340,13 @@ namespace LesbianDB.Optimism.Core
 			public readonly ConcurrentDictionary<string, bool> readFromCache = new ConcurrentDictionary<string, bool>();
 			public readonly ConcurrentDictionary<string, string> writecache = new ConcurrentDictionary<string, string>();
 			private readonly ConcurrentDictionary<string, string> readcache;
-			private readonly IReadOnlyDictionary<string, bool> consistentReads;
 			public volatile IReadOnlyDictionary<string, string> barrierReads;
 
-			public OptimisticExecutionScope(IDatabaseEngine[] databaseEngines, ConcurrentDictionary<string, string> readcache, IReadOnlyDictionary<string, bool> consistentReads, ConcurrentXHashMap<string>[] optimisticCachePartitions)
+			public OptimisticExecutionScope(IDatabaseEngine[] databaseEngines, ConcurrentDictionary<string, string> readcache, ConcurrentXHashMap<string>[] optimisticCachePartitions)
 			{
 				this.databaseEngines = databaseEngines;
 				this.readcache = readcache;
 				databaseCount = databaseEngines.Length;
-				this.consistentReads = consistentReads;
 				this.optimisticCachePartitions = optimisticCachePartitions;
 			}
 
@@ -448,37 +407,12 @@ namespace LesbianDB.Optimism.Core
 				Dictionary<string, bool> dedup = new Dictionary<string, bool>();
 
 				Dictionary<string, string> reads = new Dictionary<string, string>();
-				bool checkingoptimizability = true;
 				foreach(string key in keys){
 					if(key is null){
 						throw new NullReferenceException("Reading null keys is not supported");
 					}
 					readFromCache.TryAdd(key, false);
-					if (dedup.TryAdd(key, false) & checkingoptimizability){
-						if (consistentReads.ContainsKey(key))
-						{
-							if (writecache.TryGetValue(key, out string value))
-							{
-								reads.Add(key, value);
-							}
-							string value1 = readcache[key];
-							if (writecache.TryGetValue(key, out value))
-							{
-								reads.Add(key, value);
-							}
-							else
-							{
-								reads.Add(key, value1);
-							}
-						}
-						else
-						{
-							checkingoptimizability = false;
-						}
-					}
-				}
-				if(checkingoptimizability){
-					return reads;
+					dedup.TryAdd(key, false);
 				}
 				reads.Clear();
 				bool success = true;
