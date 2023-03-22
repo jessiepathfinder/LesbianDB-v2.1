@@ -262,7 +262,11 @@ namespace LesbianDB.Optimism.Core
 								throw new OptimisticFault();
 							}
 						}
-						finally{
+						catch(TransactionAbortedException){
+							throw new OptimisticFault();
+						}
+						finally
+						{
 							cancellationTokenSource.Cancel();
 							optimisticExecutionScope.abort = 1;
 							cancellationTokenSource.Dispose();
