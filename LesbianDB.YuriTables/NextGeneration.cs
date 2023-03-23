@@ -233,11 +233,26 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			}
 			return new TableHandle(primaryKeys, indexes, dataColumns, optimisticExecutionScope);
 		}
+		public static void EnsureRecursiveChild(this IOptimisticExecutionScope parent, IOptimisticExecutionScope child){
+		start:
+			if(ReferenceEquals(parent, child)){
+				return;
+			}
+			if(child is IChildTransaction childTransaction){
+				child = childTransaction.GetParent();
+				goto start;
+			}
+			throw new InvalidOperationException("This operation can only be purrformed on child transactions");
+		}
 	}
 	public readonly struct BTreeHandle{
 		private readonly string name;
 		private readonly PseudoSnapshotReadScope pseudoSnapshotReadScope;
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
+		public BTreeHandle GetChildHandle(IOptimisticExecutionScope child){
+			optimisticExecutionScope.EnsureRecursiveChild(child);
+			return new BTreeHandle(name, child);
+		}
 		internal BTreeHandle(string name, IOptimisticExecutionScope optimisticExecutionScope){
 			this.name = name;
 			pseudoSnapshotReadScope = new PseudoSnapshotReadScope(optimisticExecutionScope);
@@ -352,6 +367,9 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 		}
 	}
 	public readonly struct HashHandle{
+		public HashHandle GetChildHandle(IOptimisticExecutionScope child){
+			return new HashHandle(child, arrayHandle.GetChildHandle(child), name);
+		}
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
 		private readonly ArrayHandle arrayHandle;
 		private readonly string name;
@@ -450,6 +468,10 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 		}
 	}
 	public readonly struct ArrayHandle{
+		public ArrayHandle GetChildHandle(IOptimisticExecutionScope child){
+			optimisticExecutionScope.EnsureRecursiveChild(child);
+			return new ArrayHandle(child, name, boundsKey);
+		}
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
 		private readonly string name;
 		private readonly string boundsKey;
@@ -461,6 +483,14 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			this.name = name;
 			boundsKey = Misc.GetChildKey(name, "bounds");
 		}
+
+		private ArrayHandle(IOptimisticExecutionScope optimisticExecutionScope, string name, string boundsKey)
+		{
+			this.optimisticExecutionScope = optimisticExecutionScope;
+			this.name = name;
+			this.boundsKey = boundsKey;
+		}
+
 		public async Task<BigInteger> Length(){
 			string bounds = await optimisticExecutionScope.Read(boundsKey);
 			int split = bounds.IndexOf('_');
@@ -555,6 +585,14 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 		}
 	}
 	public readonly struct LargeHashHandle{
+		public LargeHashHandle GetChildHandle(IOptimisticExecutionScope child){
+			return new LargeHashHandle(new ConcurrentDictionary<uint, HashHandle>(Rewrite(child, cache.ToArray())), child, bTreeHandle.GetChildHandle(child), name);
+		}
+		private static IEnumerable<KeyValuePair<uint, HashHandle>> Rewrite(IOptimisticExecutionScope child, KeyValuePair<uint, HashHandle>[] keyValuePairs){
+			foreach(KeyValuePair<uint, HashHandle> keyValuePair in keyValuePairs){
+				yield return new KeyValuePair<uint, HashHandle>(keyValuePair.Key, keyValuePair.Value.GetChildHandle(child));
+			}
+		}
 		private readonly ConcurrentDictionary<uint, HashHandle> cache;
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
 		private readonly BTreeHandle bTreeHandle;
@@ -566,6 +604,15 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			this.bTreeHandle = bTreeHandle;
 			this.name = name;
 		}
+
+		private LargeHashHandle(ConcurrentDictionary<uint, HashHandle> cache, IOptimisticExecutionScope optimisticExecutionScope, BTreeHandle bTreeHandle, string name)
+		{
+			this.cache = cache;
+			this.optimisticExecutionScope = optimisticExecutionScope;
+			this.bTreeHandle = bTreeHandle;
+			this.name = name;
+		}
+
 		public Task<string> Read(string key){
 			if(key is null){
 				throw new ArgumentNullException(nameof(key));
@@ -639,6 +686,9 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 		private readonly string name1;
 		private readonly string dictionary;
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
+		public SortedSetHandle GetChildHandle(IOptimisticExecutionScope child){
+			return new SortedSetHandle(bTreeHandle.GetChildHandle(child), name1, dictionary, child);
+		}
 
 		internal SortedSetHandle(BTreeHandle bTreeHandle, string name1, string dictionary, IOptimisticExecutionScope optimisticExecutionScope)
 		{
@@ -767,6 +817,15 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 		private readonly IReadOnlyDictionary<string, SortedSetHandle> bTreeIndexes;
 		private readonly IReadOnlyDictionary<string, bool> dataColumns;
 		private readonly IOptimisticExecutionScope optimisticExecutionScope;
+		private static IEnumerable<KeyValuePair<string, SortedSetHandle>> Rewrite(IReadOnlyDictionary<string, SortedSetHandle> bTreeIndexes, IOptimisticExecutionScope child){
+			foreach(KeyValuePair<string, SortedSetHandle> keyValuePair in bTreeIndexes){
+				yield return new KeyValuePair<string, SortedSetHandle>(keyValuePair.Key, keyValuePair.Value.GetChildHandle(child));
+			}
+		}
+		public TableHandle GetChildHandle(IOptimisticExecutionScope child){
+			optimisticExecutionScope.EnsureRecursiveChild(child);
+			return new TableHandle(primaryRowIndexes, new Dictionary<string, SortedSetHandle>(Rewrite(bTreeIndexes, child)), dataColumns, optimisticExecutionScope);
+		}
 
 		public TableHandle(IReadOnlyDictionary<string, string> primaryRowIndexes, IReadOnlyDictionary<string, SortedSetHandle> bTreeIndexes, IReadOnlyDictionary<string, bool> dataColumns, IOptimisticExecutionScope optimisticExecutionScope)
 		{
@@ -975,7 +1034,7 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 				{
 					tasks.Enqueue(nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
 					{
-						await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
+						await me.GetChildHandle(child).UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
 						return false;
 					}));
 				}
@@ -1010,7 +1069,7 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			NestedTransactionsManager nestedTransactionsManager = new NestedTransactionsManager(optimisticExecutionScope);
 			TableHandle me = this;
 			async Task<bool> Kernel(IOptimisticExecutionScope child, string id){
-				await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).UpdateIntImpl(id, targetColumn, value, sortedSetHandle1);
+				await me.GetChildHandle(child).UpdateIntImpl(id, targetColumn, value, sortedSetHandle1);
 				return false;
 			}
 			
@@ -1065,7 +1124,7 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 				{
 					tasks.Enqueue(nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
 					{
-						await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
+						await me.GetChildHandle(child).UpdatePrimaryImpl(sortedSetReadResult.key, targetColumn, value, primaryHash);
 						return false;
 					}));
 				}
@@ -1199,7 +1258,7 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			while(queue.TryDequeue(out string id)){
 				tasks[queue.Count] = nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
 				{
-					await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).DeleteImpl(id);
+					await me.GetChildHandle(child).DeleteImpl(id);
 					return false;
 				});
 			}
@@ -1227,7 +1286,7 @@ namespace LesbianDB.Optimism.YuriTables.NextGeneration
 			{
 				tasks[queue.Count] = nestedTransactionsManager.ExecuteOptimisticFunction(async (IOptimisticExecutionScope child) =>
 				{
-					await new TableHandle(me.primaryRowIndexes, me.bTreeIndexes, me.dataColumns, child).DeleteImpl(id);
+					await me.GetChildHandle(child).DeleteImpl(id);
 					return false;
 				});
 			}
