@@ -55,6 +55,20 @@ namespace LesbianDB
 			}
 			goto start;
 		}
+		public ulong GetAll(){
+			QueueHead altered = new QueueHead();
+		start:
+			QueueHead temp = queueHead;
+			ulong count = temp.count;
+			if (count == 0){
+				return 0;
+			}
+			if (ReferenceEquals(Interlocked.CompareExchange(ref queueHead, altered, temp), temp))
+			{
+				return count;
+			}
+			goto start;
+		}
 		public void Exit(){
 			QueueHead altered = new QueueHead();
 		start:

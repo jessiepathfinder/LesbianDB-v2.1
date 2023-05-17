@@ -9,6 +9,7 @@ using Newtonsoft.Json;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace LesbianDB
 {
@@ -139,13 +140,9 @@ namespace LesbianDB
 		public ShardedAsyncDictionary(Func<IFlushableAsyncDictionary> factory, int count, long memorylimit) : this(factory, count){
 			Collect(new WeakReference<IAsyncDictionary[]>(shards, false), memorylimit, count);
 		}
+		private readonly YuriStringHash yuriStringHash = new YuriStringHash(YuriHash.GetRandom(), YuriHash.GetRandom());
 		private IAsyncDictionary GetUnderlying(string key){
-			int hash = ("asmr yuri lesbian neck kissing" + key).GetHashCode() % shards.Length;
-			if(hash < 0){
-				return shards[-hash];
-			} else{
-				return shards[hash];
-			}
+			return shards[yuriStringHash.HashString(MemoryMarshal.AsBytes(key.AsSpan())) % (ulong)shards.Length];
 		}
 
 		public Task<string> Read(string key)
@@ -189,10 +186,8 @@ namespace LesbianDB
 			}
 		}
 		private static async void Collect(WeakReference<CachedAsyncDictionary> weakReference){
-			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
-			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await asyncManagedSemaphore.Enter();
+			await Misc.WaitForNextGC();
 			if (weakReference.TryGetTarget(out CachedAsyncDictionary _this)){
 				if(Misc.thisProcess.VirtualMemorySize64 < _this.softMemoryLimit){
 					//No cache eviction until we hit memory limit
@@ -222,7 +217,6 @@ namespace LesbianDB
 					}
 
 					await flushes.ToArray();
-					Misc.AttemptSecondGC();
 				}
 				finally
 				{

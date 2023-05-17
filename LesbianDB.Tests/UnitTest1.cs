@@ -847,6 +847,30 @@ namespace LesbianDB.Tests
 			optimisticExecutionScope.Write("counter", (value + 1).ToString());
 			return value;
 		}
+
+		[Test] public async Task Nekonini(){
+			string path = Misc.GetRandomFileName();
+			Directory.CreateDirectory(path);
+			await using (NekomimiShard nekomimiShard = new NekomimiShard(path + Path.DirectorySeparatorChar + "testdb", path)){
+				Assert.Null(await nekomimiShard.Read("key"));
+				for(ushort i = 0; i < 256; ++i){
+					string str = i.ToString();
+					await nekomimiShard.Write("key", str);
+					Assert.AreEqual(str, await nekomimiShard.Read("key"));
+				}
+				await nekomimiShard.Write("key", null);
+				Assert.Null(await nekomimiShard.Read("key"));
+			}
+		}
+		[Test]
+		public async Task DurableDictionaryOptimisticCounter()
+		{
+			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(await DurableDictionaryCoordinator.Create(new PseudoDurableDictionary(new EnhancedSequentialAccessDictionary())), 0);
+			for (int i = 0; i < 4096;)
+			{
+				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
+			}
+		}
 	}
 	public static class BuyBitcoinExample{
 		private static readonly OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new YuriDatabaseEngine(new EnhancedSequentialAccessDictionary()), 268435456);

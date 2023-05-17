@@ -86,6 +86,7 @@ namespace LesbianDB
 			this.asyncDictionary = asyncDictionary ?? throw new ArgumentNullException(nameof(asyncDictionary));
 			this.binlog = binlog ?? throw new ArgumentNullException(nameof(binlog));
 			binlogLock = new AsyncMutex();
+			streamFlushingManager = new StreamFlushingManager(binlog, binlogLock);
 		}
 		public YuriDatabaseEngine(IAsyncDictionary asyncDictionary, Stream binlog, bool writefastrecover)
 		{
@@ -93,6 +94,7 @@ namespace LesbianDB
 			this.binlog = binlog ?? throw new ArgumentNullException(nameof(binlog));
 			this.writefastrecover = writefastrecover;
 			binlogLock = new AsyncMutex();
+			streamFlushingManager = new StreamFlushingManager(binlog, binlogLock);
 		}
 		public YuriDatabaseEngine(IFlushableAsyncDictionary asyncDictionary, bool doflush) : this(asyncDictionary)
 		{
@@ -115,15 +117,12 @@ namespace LesbianDB
 			}
 		}
 		private static async void SelfFlushingLoop(WeakReference<YuriDatabaseEngine> weakReference){
-			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
-			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await asyncManagedSemaphore.Enter();
+			await Misc.WaitForNextGC();
 			if (weakReference.TryGetTarget(out YuriDatabaseEngine yuriDatabaseEngine)){
 				await yuriDatabaseEngine.flushLock.AcquireWriterLock();
 				try{
 					await ((IFlushableAsyncDictionary)yuriDatabaseEngine.asyncDictionary).Flush();
-					Misc.AttemptSecondGC();
 				} finally{
 					yuriDatabaseEngine.flushLock.ReleaseWriterLock();
 				}
@@ -136,7 +135,9 @@ namespace LesbianDB
 		private readonly VeryASMRLockingManager veryASMRLockingManager = new VeryASMRLockingManager();
 		private readonly ConcurrentQueue<Exception> damages = new ConcurrentQueue<Exception>();
 		private readonly AsyncReaderWriterLock damageCheckingLock = new AsyncReaderWriterLock();
+		private readonly StreamFlushingManager streamFlushingManager;
 		private Exception binlogException;
+		private readonly LockOrderingComparer lockOrderingComparer = new LockOrderingComparer();
 		private async Task WriteAndFlushBinlog(byte[] buffer, int len){
 			await binlog.WriteAsync(buffer, 0, len);
 			await binlog.FlushAsync();
@@ -208,7 +209,7 @@ namespace LesbianDB
 			}
 			//Lock ordering
 			List<string> locks = lockLevels.Keys.ToList();
-			locks.Sort(LockOrderingComparer.instance);
+			locks.Sort(lockOrderingComparer);
 
 			//Pending reads
 			Dictionary<string, Task<string>> pendingReads = new Dictionary<string, Task<string>>();
@@ -284,7 +285,7 @@ namespace LesbianDB
 						}
 						try
 						{
-							await WriteAndFlushBinlog(binlog_buffer, binlog_writelen + 4);
+							await binlog.WriteAsync(binlog_buffer, 0, binlog_writelen + 4);
 							writeTasks.Enqueue(asyncDictionary.Write("LesbianDB_reserved_binlog_height", binlog.Position.ToString()));
 						}
 						catch (Exception e)
@@ -297,6 +298,7 @@ namespace LesbianDB
 					{
 						binlogLock.Exit();
 					}
+					await streamFlushingManager.Flush();
 				}
 				await flushLock.AcquireReaderLock();
 				try
@@ -601,6 +603,82 @@ namespace LesbianDB
 	public sealed class LockStolenException : Exception{
 		public LockStolenException() : base("The lock has been stolen by another thread"){
 			
+		}
+	}
+
+	public readonly struct StreamFlushingManager
+	{
+		private readonly ConcurrentBag<TaskCompletionSource<bool>> concurrentBag;
+		private readonly AsyncManagedSemaphore asyncManagedSemaphore;
+
+		public StreamFlushingManager(Stream stream, AsyncMutex asyncMutex)
+		{
+			asyncManagedSemaphore = new AsyncManagedSemaphore(0);
+			concurrentBag = new ConcurrentBag<TaskCompletionSource<bool>>();
+			Loop(concurrentBag, asyncManagedSemaphore, stream, asyncMutex);
+		}
+		private static async void Loop(ConcurrentBag<TaskCompletionSource<bool>> concurrentBag, AsyncManagedSemaphore asyncManagedSemaphore, Stream stream, AsyncMutex asyncMutex)
+		{
+			Queue<TaskCompletionSource<bool>> queue = new Queue<TaskCompletionSource<bool>>();
+			while (true)
+			{
+
+				await asyncManagedSemaphore.Enter();
+				if (!concurrentBag.TryTake(out TaskCompletionSource<bool> taskCompletionSource))
+				{
+					return;
+				}
+				queue.Enqueue(taskCompletionSource);
+
+				ulong count = asyncManagedSemaphore.GetAll();
+				for(ulong i = 0; i < count; ++i){
+					if (concurrentBag.TryTake(out TaskCompletionSource<bool> taskCompletionSource1))
+					{
+						queue.Enqueue(taskCompletionSource1);
+						continue;
+					}
+					return;
+				}
+
+				try
+				{
+					await asyncMutex.Enter();
+					try
+					{
+						await stream.FlushAsync();
+					}
+					finally
+					{
+						asyncMutex.Exit();
+					}
+				}
+				catch (Exception e)
+				{
+					while (queue.TryDequeue(out TaskCompletionSource<bool> taskCompletionSource1))
+					{
+						taskCompletionSource1.SetException(e);
+					}
+					return;
+				}
+
+				while (queue.TryDequeue(out TaskCompletionSource<bool> taskCompletionSource1))
+				{
+					taskCompletionSource1.SetResult(false);
+				}
+			}
+		}
+
+		public Task Flush()
+		{
+			TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>();
+			concurrentBag.Add(taskCompletionSource);
+			asyncManagedSemaphore.Exit();
+			return taskCompletionSource.Task;
+		}
+
+		public void Close()
+		{
+			asyncManagedSemaphore.Exit();
 		}
 	}
 }

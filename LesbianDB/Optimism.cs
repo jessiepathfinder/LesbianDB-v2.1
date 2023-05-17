@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -163,18 +164,16 @@ namespace LesbianDB.Optimism.Core
 		
 		private readonly IDatabaseEngine[] databaseEngines;
 		private readonly int databaseEnginesCount;
+		private static readonly YuriStringHash optimismHashGenerator = new YuriStringHash(YuriHash.GetRandom(), YuriHash.GetRandom());
 
 		private readonly ConcurrentXHashMap<string>[] optimisticCachePartitions = new ConcurrentXHashMap<string>[256];
 		private static async void Collect(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit){
-			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
-			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await asyncManagedSemaphore.Enter();
-			if(weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] optimisticCachePartitions)){
+			await Misc.WaitForNextGC();
+			if (weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] optimisticCachePartitions)){
 				if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
 				{
 					optimisticCachePartitions[Misc.FastRandom(0, 256)].Clear();
-					Misc.AttemptSecondGC();
 				}
 				goto start;
 			}
@@ -198,14 +197,16 @@ namespace LesbianDB.Optimism.Core
 			
 		}
 		private readonly VeryASMRLockingManager veryASMRLockingManager = new VeryASMRLockingManager();
-
+		private static byte Hash(string key){
+			return (byte)(optimismHashGenerator.HashString(MemoryMarshal.AsBytes(key.AsSpan())) & 255);
+		}
+		private readonly LockOrderingComparer lockOrderingComparer = new LockOrderingComparer();
 		public async Task<T> ExecuteOptimisticFunction<T>(Func<IOptimisticExecutionScope, Task<T>> optimisticFunction)
 		{
 			ConcurrentDictionary<string, string> readCache = new ConcurrentDictionary<string, string>();
 			IReadOnlyDictionary<string, string> reads;
 			Dictionary<string, LockMode> locks = new Dictionary<string, LockMode>();
 			List<string> sortedLockList = new List<string>();
-			IEnumerable<string> contendedKeys1 = null;
 			while (true){
 				OptimisticExecutionScope optimisticExecutionScope = new OptimisticExecutionScope(databaseEngines, readCache, optimisticCachePartitions);
 				T ret;
@@ -225,7 +226,7 @@ namespace LesbianDB.Optimism.Core
 						sortedLockList.Capacity = locksCount * 2;
 					}
 					sortedLockList.AddRange(locks.Keys);
-					sortedLockList.Sort(LockOrderingComparer.instance);
+					sortedLockList.Sort(lockOrderingComparer);
 				}
 				foreach (string lockstr in sortedLockList)
 				{
@@ -239,15 +240,6 @@ namespace LesbianDB.Optimism.Core
 				}
 				try
 				{
-					if(contendedKeys1 is { })
-					{
-						foreach (KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseEnginesCount)].Execute(contendedKeys1, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance)){
-							string key = keyValuePair.Key;
-							string value = keyValuePair.Value;
-							optimisticCachePartitions[key.GetHashCode() & 255][key] = value;
-							readCache.TryAdd(key, value);
-						}
-					}
 					CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
 					DeferredConflictMonitoringRegistration(new WeakReference<ConcurrentBag<WeakReference<OptimisticExecutionScope>>>(concurrentBag, false), new WeakReference<OptimisticExecutionScope>(optimisticExecutionScope, false), cancellationTokenSource.Token);
 					try
@@ -304,7 +296,6 @@ namespace LesbianDB.Optimism.Core
 							newstate.Enqueue(keyValuePair);
 						}
 						readCache = new ConcurrentDictionary<string, string>(newstate.ToArray());
-						contendedKeys1 = contendedKeys2.ToArray();
 						continue;
 					}
 					catch (Exception e)
@@ -367,6 +358,13 @@ namespace LesbianDB.Optimism.Core
 						conditions = SafeEmptyReadOnlyDictionary<string, string>.instance;
 					}
 					
+					if(optimisticExecutionScope.readFromCache.Count == 0 && writeCache.Count == 0)
+					{
+						if(failure is null){
+							return ret;
+						}
+						ExceptionDispatchInfo.Throw(failure);
+					}
 					
 					upgrading = true;
 					while(upgradeQueue.TryDequeue(out LockHandle lockHandle)){
@@ -411,11 +409,10 @@ namespace LesbianDB.Optimism.Core
 							{
 								continue;
 							}
-							optimisticCachePartitions[key.GetHashCode() & 255][key] = keyValuePair1.Value;
+							optimisticCachePartitions[Hash(key)][key] = keyValuePair1.Value;
 						}
 					});
-					readCache = new ConcurrentDictionary<string, string>(GetUncontendedKeys(reads, contendedKeys));
-					contendedKeys1 = contendedKeys.Keys;
+					readCache = new ConcurrentDictionary<string, string>(reads);
 				} else{
 					if (failure is null)
 					{
@@ -426,7 +423,7 @@ namespace LesbianDB.Optimism.Core
 							foreach (KeyValuePair<string, string> keyValuePair1 in writeCache)
 							{
 								string key = keyValuePair1.Key;
-								ConcurrentXHashMap<string> cachefragment = optimisticCachePartitions[key.GetHashCode() & 255];
+								ConcurrentXHashMap<string> cachefragment = optimisticCachePartitions[Hash(key)];
 								if (conditions.TryGetValue(key, out string val1))
 								{
 									string value = keyValuePair1.Value;
@@ -579,7 +576,7 @@ namespace LesbianDB.Optimism.Core
 					readFromCache.TryAdd(key, false);
 					return value1;
 				}
-				ConcurrentXHashMap<string> cacheBucket = optimisticCachePartitions[key.GetHashCode() & 255];
+				ConcurrentXHashMap<string> cacheBucket = optimisticCachePartitions[Hash(key)];
 				Hash256 hash = new Hash256(key);
 				if(cacheBucket.TryGetValue(hash, out value1)){
 					value1 = readcache.GetOrAdd(key, value1);
@@ -639,7 +636,7 @@ namespace LesbianDB.Optimism.Core
 							reads.Add(key, value);
 						}
 					}
-					optimisticCachePartitions[key.GetHashCode() & 255][key] = value;
+					optimisticCachePartitions[Hash(key)][key] = value;
 					
 				}
 				if(success){

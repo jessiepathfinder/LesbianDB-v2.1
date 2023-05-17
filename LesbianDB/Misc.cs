@@ -27,7 +27,6 @@ namespace LesbianDB
 		}
 		private static readonly K[] emptyKeys = new K[0];
 		private static readonly V[] emptyValues = new V[0];
-		private static readonly KeyValuePair<K, V>[] emptyKeyValuePairs = new KeyValuePair<K, V>[0];
 		private sealed class EmptyEnumerator<T> : IEnumerator<T>
 		{
 			private EmptyEnumerator(){
@@ -241,6 +240,15 @@ namespace LesbianDB
 			}
 			return span[0] ^ span[1];
 		}
+		public static long HashString5(string str)
+		{
+			Span<long> span = stackalloc long[2];
+			using (MD5 md5 = MD5.Create())
+			{
+				md5.TryComputeHash(MemoryMarshal.AsBytes(str.AsSpan()), MemoryMarshal.AsBytes(span), out _);
+			}
+			return span[0] ^ span[1];
+		}
 		public static async Task AtomicFileRewrite(string filename, ReadOnlyMemory<byte> newContent)
 		{
 			string tempfile = GetRandomFileName();
@@ -256,25 +264,36 @@ namespace LesbianDB
 				yield return temp;
 			}
 		}
-		[ThreadStatic] private static Random random;
+		private static readonly YuriHash yuriHash = YuriHash.GetRandom();
+		private static long seed;
+
+		public static ulong FastRandomUlong(){
+			Span<long> span = stackalloc long[1];
+			Span<ulong> span2 = MemoryMarshal.Cast<long, ulong>(span);
+			long current = seed;
+		start:
+
+			span[0] = current;
+			ulong result = yuriHash.Permute(span2[0]);
+			span2[0] = result;
+
+			long x2 = Interlocked.CompareExchange(ref seed, span[0], current);
+			if(x2 == current){
+				return result;
+			}
+			current = x2;
+			goto start;
+
+		}
+
+
 		public static int FastRandom(int from, int to){
-			Random temp = random;
-			if (temp is null){
-				goto initialize;
+			long lfrom = from;
+			long range = to - lfrom;
+			if(range < 1){
+				return 0;
 			}
-			//1/256 chance of reseeding for every random number generated
-			if(temp.Next() < 8388608)
-			{
-				goto initialize;
-			}
-			goto finish;
-		initialize:
-			Span<int> seed = stackalloc int[1];
-			RandomNumberGenerator.Fill(MemoryMarshal.AsBytes(seed));
-			temp = new Random(seed[0]);
-			random = temp;
-		finish:
-			return temp.Next(from, to);
+			return (int)((long)(FastRandomUlong() % (ulong)range) + lfrom);
 		}
 		public static string GetChildKey(string parent, string key)
 		{
@@ -297,56 +316,43 @@ namespace LesbianDB
 			return new FastMultiAwaiter(tasks);
 		}
 
-		private static readonly ConcurrentBag<WeakReference<AsyncManagedSemaphore>> GCListenersActivationQueue = new ConcurrentBag<WeakReference<AsyncManagedSemaphore>>();
-		public static void RegisterGCListenerSemaphore(AsyncManagedSemaphore asyncManagedSemaphore){
-			GCListenersActivationQueue.Add(new WeakReference<AsyncManagedSemaphore>(asyncManagedSemaphore, false));
-		}
-		private static volatile int doneSecondGC;
-		public static void AttemptSecondGC(){
-			if(Interlocked.Exchange(ref doneSecondGC, 1) == 0){
-				GC.Collect(0, GCCollectionMode.Forced, false, true);
-			}
+		private static readonly ConcurrentBag<TaskCompletionSource<bool>> GCTaskCompletionSources = new ConcurrentBag<TaskCompletionSource<bool>>();
+		public static Task WaitForNextGC(){
+			TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>();
+			GCTaskCompletionSources.Add(taskCompletionSource);
+			return taskCompletionSource.Task;
 		}
 		private static void GCMonitorThread(){
-			
-			Queue<WeakReference<AsyncManagedSemaphore>> GCListeners = null;
+			AppDomain domain = AppDomain.CurrentDomain;
 			while (true){
-				if (AppDomain.CurrentDomain.IsFinalizingForUnload())
+				if (domain.IsFinalizingForUnload())
 				{
 					return;
 				}
-				do
+				GC.WaitForPendingFinalizers();
+				if (domain.IsFinalizingForUnload())
 				{
-					GC.WaitForPendingFinalizers();
-				} while (Interlocked.Exchange(ref doneSecondGC, 0) == 1);
-				Queue<WeakReference<AsyncManagedSemaphore>> newqueue = new Queue<WeakReference<AsyncManagedSemaphore>>();
-				while (GCListenersActivationQueue.TryTake(out WeakReference<AsyncManagedSemaphore> weakReference)){
-					if(weakReference.TryGetTarget(out AsyncManagedSemaphore asyncManagedSemaphore)){
-						asyncManagedSemaphore.Exit();
-						newqueue.Enqueue(weakReference);
-					}
+					return;
 				}
-				if(GCListeners is null){
-					if(newqueue.Count > 0){
-						GCListeners = newqueue;
-					}
-					continue;
+				while (GCTaskCompletionSources.TryTake(out TaskCompletionSource<bool> taskCompletionSource)){
+					taskCompletionSource.SetResult(false);
 				}
-				while(GCListeners.TryDequeue(out WeakReference<AsyncManagedSemaphore> weakReference)){
-					if (weakReference.TryGetTarget(out AsyncManagedSemaphore asyncManagedSemaphore))
-					{
-						asyncManagedSemaphore.Exit();
-						newqueue.Enqueue(weakReference);
-					}
-				}
-				GCListeners = newqueue;
 			}
 		}
 		static Misc(){
-			Thread thread = new Thread(GCMonitorThread);
-			thread.Name = "LesbianDB GC monitoring thread";
-			thread.IsBackground = true;
-			thread.Start();
+			if(BitConverter.IsLittleEndian){
+				Span<long> span = stackalloc long[1];
+				RandomNumberGenerator.Fill(MemoryMarshal.AsBytes(span));
+				seed = span[0];
+
+				Thread thread = new Thread(GCMonitorThread);
+				thread.Name = "LesbianDB GC monitoring thread";
+				thread.IsBackground = true;
+				thread.Start();
+			} else{
+				throw new InvalidOperationException("LesbianDB does not properly support big-endian systems");
+			}
+			
 		}
 	}
 	public sealed class ObjectDamagedException : Exception

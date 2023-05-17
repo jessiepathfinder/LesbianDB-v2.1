@@ -81,14 +81,12 @@ namespace LesbianDB.Optimism.Armitage
 			Collect(new WeakReference<ConcurrentDictionary<string, SpeculativeExecutionResult>[]>(cache, false), softMemoryLimit);
 		}
 		private static async void Collect(WeakReference<ConcurrentDictionary<string, SpeculativeExecutionResult>[]> weakReference, long softMemoryLimit){
-			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
-			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
+
 		start:
-			await asyncManagedSemaphore.Enter();
+			await Misc.WaitForNextGC();
 			if (weakReference.TryGetTarget(out ConcurrentDictionary<string, SpeculativeExecutionResult>[] cache)){
 				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
 					cache[Misc.FastRandom(0, 256)].Clear();
-					Misc.AttemptSecondGC();
 				}
 				goto start;
 			}

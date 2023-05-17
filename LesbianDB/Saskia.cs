@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -409,6 +410,7 @@ namespace LesbianDB
 	public sealed class RandomReplacementWriteThroughCache : IFlushableAsyncDictionary{
 		private readonly ConcurrentXHashMap<string>[] cache = new ConcurrentXHashMap<string>[256];
 		private readonly IAsyncDictionary underlying;
+		private readonly YuriStringHash yuriStringHash = new YuriStringHash(YuriHash.GetRandom(), YuriHash.GetRandom());
 
 		public RandomReplacementWriteThroughCache(IAsyncDictionary underlying, long softMemoryLimit)
 		{
@@ -424,20 +426,17 @@ namespace LesbianDB
 			cache[Misc.FastRandom(0, 256)].Clear();
 		}
 		private static async void EvictionThread(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit){
-			AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
-			Misc.RegisterGCListenerSemaphore(asyncManagedSemaphore);
 		start:
-			await asyncManagedSemaphore.Enter();
+			await Misc.WaitForNextGC();
 			if (weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] cache)){
 				if(Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit){
 					RandomEvict(cache);
-					Misc.AttemptSecondGC();
 				}
 				goto start;
 			}
 		}
 		private ConcurrentXHashMap<string> Hash(string key){
-			return cache[("Cute anime lesbians" + key).GetHashCode() & 255];
+			return cache[yuriStringHash.HashString(MemoryMarshal.AsBytes(key.AsSpan())) & 255];
 		}
 		public async Task<string> Read(string key)
 		{
@@ -450,8 +449,14 @@ namespace LesbianDB
 
 		public Task Write(string key, string value)
 		{
+			ConcurrentXHashMap<string> keyValuePairs = Hash(key);
+			if(keyValuePairs.TryGetValue(key, out string value1)){
+				if(value == value1){
+					return Misc.completed;
+				}
+			}
 			Task task = underlying.Write(key, value);
-			Hash(key)[key] = value;
+			keyValuePairs[key] = value;
 			return task;
 		}
 

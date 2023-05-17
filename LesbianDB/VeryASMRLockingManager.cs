@@ -15,18 +15,15 @@ namespace LesbianDB
 	}
 	public sealed class LockOrderingComparer : IComparer<string>
 	{
-		private LockOrderingComparer() {
-
-		}
-		public static readonly LockOrderingComparer instance = new LockOrderingComparer();
+		private static readonly YuriStringHash yuriStringHash = new YuriStringHash(YuriHash.GetRandom(), YuriHash.GetRandom());
 		public int Compare(string x, string y)
 		{
 			int lenx = x.Length;
 			int leny = y.Length;
 
 			if (lenx == leny) {
-				int hashx = x.GetHashCode();
-				int hashy = y.GetHashCode();
+				ulong hashx = yuriStringHash.HashString(MemoryMarshal.AsBytes(x.AsSpan()));
+				ulong hashy = yuriStringHash.HashString(MemoryMarshal.AsBytes(y.AsSpan()));
 				if (hashx == hashy)
 				{
 					ReadOnlySpan<byte> spanx = MemoryMarshal.AsBytes(x.AsSpan());
@@ -42,14 +39,16 @@ namespace LesbianDB
 					}
 					return 0;
 				}
-				return hashx - hashy;
+				return hashx.CompareTo(hashy);
 			}
 			return lenx - leny;
 		}
 	}
 	public sealed class VeryASMRLockingManager
 	{
+		
 		private readonly WeakReference<ConcurrentDictionary<string, AsyncReaderWriterLock>>[] locks = new WeakReference<ConcurrentDictionary<string, AsyncReaderWriterLock>>[65536];
+		private readonly YuriStringHash yuriStringHash = new YuriStringHash(YuriHash.GetRandom(), YuriHash.GetRandom());
 		private static ConcurrentDictionary<string, AsyncReaderWriterLock> GetLockGroup(WeakReference<ConcurrentDictionary<string, AsyncReaderWriterLock>>[] locks, ushort id)
 		{
 			WeakReference<ConcurrentDictionary<string, AsyncReaderWriterLock>> wr = locks[id];
@@ -79,7 +78,7 @@ namespace LesbianDB
 			}
 		}
 		public async Task<LockHandle> Lock(string str, LockMode lockMode) {
-			ConcurrentDictionary<string, AsyncReaderWriterLock> keyValuePairs = GetLockGroup(locks, (ushort)((str + "South Vietnam is a very ASMR country").GetHashCode() & 65535));
+			ConcurrentDictionary<string, AsyncReaderWriterLock> keyValuePairs = GetLockGroup(locks, (ushort)(yuriStringHash.HashString(MemoryMarshal.AsBytes(str.AsSpan())) & 65535));
 			if (!keyValuePairs.TryGetValue(str, out AsyncReaderWriterLock asyncReaderWriterLock)) {
 				asyncReaderWriterLock = keyValuePairs.GetOrAdd(str, new AsyncReaderWriterLock(true));
 			}
