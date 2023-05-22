@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -55,16 +56,20 @@ namespace LesbianDB{
 		private readonly ConcurrentBag<WriteCommand> writeCommands = new ConcurrentBag<WriteCommand>();
 		private readonly ConcurrentBag<ReadCommand> readCommands = new ConcurrentBag<ReadCommand>();
 		private readonly AsyncManagedSemaphore asyncManagedSemaphore = new AsyncManagedSemaphore(0);
-		private readonly Task looptsk;
+		private readonly Task<string> looptsk;
+		private readonly Task looptsk2;
 
 		public NekomimiShard(string filename, string tempdir)
 		{
 			this.filename = filename ?? throw new ArgumentNullException(nameof(filename));
 			this.tempdir = tempdir ?? throw new ArgumentNullException(nameof(tempdir));
 			looptsk = Loop();
+			TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>();
+			looptsk.GetAwaiter().OnCompleted(() => taskCompletionSource.SetResult(false));
+			looptsk2 = taskCompletionSource.Task;
 		}
 
-		private async Task Loop(){
+		private async Task<string> Loop(){
 			Queue<TaskCompletionSource<bool>> taskCompletionSources = new Queue<TaskCompletionSource<bool>>();
 			Queue<ReadCommand> readQueue = new Queue<ReadCommand>();
 			while (true){
@@ -105,7 +110,7 @@ namespace LesbianDB{
 							queue.Enqueue(readCommand.taskCompletionSource);
 							continue;
 						}
-						return;
+						throw new ObjectDisposedException(nameof(NekomimiShard));
 					}
 					ValueTask dispose = default;
 					bool needDispose = false;
@@ -197,31 +202,32 @@ namespace LesbianDB{
 						readCommand1.taskCompletionSource.SetResult(null);
 					}
 				}
-				 catch (Exception e)
-			{
-				while (taskCompletionSources.TryDequeue(out TaskCompletionSource<bool> task))
+				catch (Exception e)
 				{
-					task.SetException(e);
-				}
-				if(write){
-					while (readQueue.TryDequeue(out ReadCommand readCommand))
+					while (taskCompletionSources.TryDequeue(out TaskCompletionSource<bool> task))
 					{
-						readCommand.taskCompletionSource.SetException(e);
+						task.SetException(e);
 					}
-				} else
-				{
-					foreach(Queue<TaskCompletionSource<string>> queue in dict.Values){
-						while (queue.TryDequeue(out TaskCompletionSource<string> taskCompletionSource))
+					if(write){
+						while (readQueue.TryDequeue(out ReadCommand readCommand))
 						{
-							taskCompletionSource.SetException(e);
+							readCommand.taskCompletionSource.SetException(e);
+						}
+					} else
+					{
+						foreach(Queue<TaskCompletionSource<string>> queue in dict.Values){
+							while (queue.TryDequeue(out TaskCompletionSource<string> taskCompletionSource))
+							{
+								taskCompletionSource.SetException(e);
+							}
 						}
 					}
+					throw new ObjectDamagedException(e);
 				}
 			}
 		}
-	}
 
-		public Task<string> Read(string key)
+		public async Task<string> Read(string key)
 		{
 			if(key is null){
 				throw new ArgumentNullException(nameof(key));
@@ -229,10 +235,11 @@ namespace LesbianDB{
 			TaskCompletionSource<string> taskCompletionSource = new TaskCompletionSource<string>();
 			readCommands.Add(new ReadCommand(taskCompletionSource, key));
 			asyncManagedSemaphore.Exit();
-			return taskCompletionSource.Task;
+
+			return (await Task.WhenAny(taskCompletionSource.Task, looptsk)).Result;
 		}
 
-		public Task Write(string key, string value)
+		public async Task Write(string key, string value)
 		{
 			if (key is null)
 			{
@@ -241,7 +248,7 @@ namespace LesbianDB{
 			TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>();
 			writeCommands.Add(new WriteCommand(taskCompletionSource, key, value));
 			asyncManagedSemaphore.Exit();
-			return taskCompletionSource.Task;
+			(await Task.WhenAny(taskCompletionSource.Task, looptsk)).GetAwaiter().GetResult();
 		}
 
 		private volatile int disposed;
@@ -251,7 +258,7 @@ namespace LesbianDB{
 				asyncManagedSemaphore.Exit();
 				GC.SuppressFinalize(this);
 			}
-			return new ValueTask(looptsk);
+			return new ValueTask(looptsk2);
 		}
 
 		~NekomimiShard(){
@@ -308,6 +315,67 @@ namespace LesbianDB{
 		public Task Write(string key, string value)
 		{
 			return nekomimis[Hash(key)].Write(key, value);
+		}
+	}
+	public sealed class DurableWriteThroughCache : IDurableDictionary
+	{
+		private readonly ConcurrentXHashMap<string>[] cache = new ConcurrentXHashMap<string>[256];
+		private readonly IDurableDictionary underlying;
+		private readonly YuriStringHash yuriStringHash = new YuriStringHash(YuriHash.GetRandom(), YuriHash.GetRandom());
+
+		public DurableWriteThroughCache(IDurableDictionary underlying, long softMemoryLimit)
+		{
+			for (int i = 0; i < 256;)
+			{
+				cache[i++] = new ConcurrentXHashMap<string>();
+			}
+			EvictionThread(new WeakReference<ConcurrentXHashMap<string>[]>(cache, false), softMemoryLimit);
+			this.underlying = underlying ?? throw new ArgumentNullException(nameof(underlying));
+		}
+		private static void RandomEvict(ConcurrentXHashMap<string>[] cache)
+		{
+			cache[Misc.FastRandom(0, 256)].Clear();
+		}
+		private static async void EvictionThread(WeakReference<ConcurrentXHashMap<string>[]> weakReference, long softMemoryLimit)
+		{
+		start:
+			await Misc.WaitForNextGC();
+			if (weakReference.TryGetTarget(out ConcurrentXHashMap<string>[] cache))
+			{
+				if (Misc.thisProcess.VirtualMemorySize64 > softMemoryLimit)
+				{
+					RandomEvict(cache);
+				}
+				goto start;
+			}
+		}
+		private ConcurrentXHashMap<string> Hash(string key)
+		{
+			return cache[yuriStringHash.HashString(MemoryMarshal.AsBytes(key.AsSpan())) & 255];
+		}
+		public async Task<string> Read(string key)
+		{
+			ConcurrentXHashMap<string> keyValuePairs = Hash(key);
+			if (keyValuePairs.TryGetValue(key, out string value))
+			{
+				return value;
+			}
+			return keyValuePairs.GetOrAdd(new Hash256(key), await underlying.Read(key));
+		}
+
+		public Task Write(string key, string value)
+		{
+			ConcurrentXHashMap<string> keyValuePairs = Hash(key);
+			if (keyValuePairs.TryGetValue(key, out string value1))
+			{
+				if (value == value1)
+				{
+					return Misc.completed;
+				}
+			}
+			Task task = underlying.Write(key, value);
+			keyValuePairs[key] = value;
+			return task;
 		}
 	}
 }

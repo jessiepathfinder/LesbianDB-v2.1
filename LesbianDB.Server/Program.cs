@@ -20,11 +20,11 @@ namespace LesbianDB.Server
 		{
 			[Option("listen", Required = true, HelpText = "The HTTP websocket prefix to listen to (e.g https://lesbiandb-eu.scalegrid.com/c160d449395b5fbe70fcd18cef59264b/)")]
 			public string Listen { get; set; }
-			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd/kellyanne/purrfectng)")]
+			[Option("engine", Required = true, HelpText = "The storage engine to use (yuri/leveldb/saskia/purrfectodd/kellyanne/purrfectng/nekomimi)")]
 			public string Engine { get; set; }
-			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd/purrfectng, optional for saskia, have no effect for yuri/kellyanne)")]
+			[Option("persist-dir", Required = false, HelpText = "The directory used to store the leveldb/saskia on-disk dictionary (required for leveldb/purrfectodd/purrfectng/nekomimi, optional for saskia, have no effect for yuri/kellyanne)")]
 			public string PersistDir { get; set; }
-			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability (no effect for kellyanne/purrfectng storage engine).")]
+			[Option("binlog", Required = false, HelpText = "The path of the binlog used for persistance/enhanced durability (no effect for kellyanne/purrfectng/nekomimi storage engine).")]
 			public string Binlog{ get; set; }
 			[Option("soft-memory-limit", Required = false, HelpText = "The soft limit to memory usage (in bytes)", Default = 268435456)]
 			public long SoftMemoryLimit { get; set; }
@@ -45,7 +45,7 @@ namespace LesbianDB.Server
 			public int EphemeralSaskiaBucketsCount { get; set; }
 			[Option("clear-binlog", Required = false, HelpText = "Clears the binlog on startup (only applictable for PurrfectODD/Saskia storage engines). Make sure to backup your on-disk dictionary first if you are using Saskia since Saskia cannot tolerate unexpected power failures!", Default = false)]
 			public bool ClearBinlog { get; set; }
-			[Option("no-read-cache", Required = false, HelpText = "Disables the read cache (useful for databases accessed solely via the Optimistic Functions Framework, recognized by Saskia/PurrfectODD storage engines)", Default = false)]
+			[Option("no-read-cache", Required = false, HelpText = "Disables the read cache (recognized by Saskia/PurrfectODD/nekomimi storage engines)", Default = false)]
 			public bool NoReadCache { get; set; }
 			[Option("transient-storage-shards", Required = false, HelpText = "A file containing the list of transient storage shards for use with the Kellyanne sharded database engine.", Default = null)]
 			public string TransientStorageShards { get; set; }
@@ -127,7 +127,6 @@ namespace LesbianDB.Server
 				inhibitDomainExit.Dispose();
 			};
 			IDatabaseEngine databaseEngine;
-			Action closeLevelDB;
 			Stream binlog;
 			if(engine == "kellyanne" | engine == "purrfectng"){
 				binlog = null;
@@ -145,7 +144,6 @@ namespace LesbianDB.Server
 			}
 			Console.WriteLine("Creating storage engine...");
 			Task load;
-			Task<LevelDBEngine> getDatabaseEngine;
 			ISwapAllocator yuriMalloc;
 			IAsyncDictionary asyncDictionary;
 			IAsyncDisposable finalFlush;
@@ -166,8 +164,6 @@ namespace LesbianDB.Server
 				case "yuri":
 					finalFlush = null;
 					lockfile = null;
-					getDatabaseEngine = null;
-					closeLevelDB = null;
 					yuriMalloc = CreateYuriMalloc(options,comptype);
 					int yuriBuckets = options.YuriBuckets;
 					compressionLevel = comptype is null ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
@@ -181,9 +177,7 @@ namespace LesbianDB.Server
 					}
 					break;
 				case "saskia":
-					getDatabaseEngine = null;
 					finalFlush = null;
-					closeLevelDB = null;
 					if (persistdir is null){
 						lockfile = null;
 						if(options.SaskiaZram){
@@ -234,26 +228,6 @@ namespace LesbianDB.Server
 					databaseEngine = binlog is null ? new YuriDatabaseEngine(asyncDictionary) : new YuriDatabaseEngine(asyncDictionary, binlog);
 
 					break;
-				case "leveldb":
-					finalFlush = null;
-					asyncDictionary = null;
-					lockfile = null;
-					if (persistdir is null){
-						throw new Exception("--persist-dir is mandatory for leveldb storage engine!");
-					}
-					if(binlog is null){
-						load = null;
-						LevelDBEngine levelDBEngine = new LevelDBEngine(persistdir, options.SoftMemoryLimit);
-						closeLevelDB = levelDBEngine.Dispose;
-						databaseEngine = levelDBEngine;
-						getDatabaseEngine = null;
-					} else{
-						closeLevelDB = null;
-						getDatabaseEngine = LevelDBEngine.RestoreBinlog(binlog, persistdir, options.SoftMemoryLimit);
-						load = null;
-						databaseEngine = null;
-					}
-					break;
 				case "purrfectodd":
 					if (persistdir is null)
 					{
@@ -289,8 +263,6 @@ namespace LesbianDB.Server
 						databaseEngine = new YuriDatabaseEngine(cached, binlog, true, true);
 					}
 					asyncDictionary = cached;
-					getDatabaseEngine = null;
-					closeLevelDB = null;
 					lockfile = null;
 					finalFlush = null;
 					break;
@@ -318,8 +290,6 @@ namespace LesbianDB.Server
 					}
 					load = Task.WhenAll(locktasks);
 					asyncDictionary = null;
-					getDatabaseEngine = null;
-					closeLevelDB = null;
 					lockfile = null;
 					finalFlush = null;
 					databaseEngine = new Kellyanne(redoLogShards, ephemeralStorageShards);
@@ -348,11 +318,29 @@ namespace LesbianDB.Server
 
 					load = null;
 					asyncDictionary = null;
-					getDatabaseEngine = null;
-					closeLevelDB = null;
 					lockfile = null;
 					finalFlush = null;
-					databaseEngine = new PurrfectNG(persistdir, mallocator1 is null ? new ShardedAsyncDictionary(factory1, options.EphemeralSaskiaBucketsCount, memory1) : (IAsyncDictionary)new LargeDataOffloader(new ShardedAsyncDictionary(factory1, options.EphemeralSaskiaBucketsCount, memory1), mallocator1, compressionLevel));
+					IAsyncDictionary asyncDictionary1 = mallocator1 is null ? new ShardedAsyncDictionary(factory1, options.EphemeralSaskiaBucketsCount, memory1) : (IAsyncDictionary)new LargeDataOffloader(new ShardedAsyncDictionary(factory1, options.EphemeralSaskiaBucketsCount, memory1), mallocator1, compressionLevel);
+					if (!(saskiazram1 || options.NoReadCache))
+					{
+						asyncDictionary1 = new RandomReplacementWriteThroughCache(asyncDictionary, options.SoftMemoryLimit);
+					}
+
+					databaseEngine = new PurrfectNG(persistdir, asyncDictionary1);
+					break;
+				case "nekomimi":
+					finalFlush = null;
+					lockfile = null;
+					if (persistdir is null)
+					{
+						throw new Exception("--persist-dir is mandatory for Nekomimi storage engine!");
+					}
+					IDurableDictionary durableDictionary = new Nekomimi(persistdir);
+					if(!options.NoReadCache){
+						durableDictionary = new DurableWriteThroughCache(durableDictionary, options.SoftMemoryLimit);
+					}
+					databaseEngine = DurableDictionaryCoordinator.Create(durableDictionary, out load);
+					asyncDictionary = null;
 					break;
 				default:
 					throw new Exception("Unknown storage engine: " + engine);
@@ -367,7 +355,7 @@ namespace LesbianDB.Server
 
 			Console.WriteLine("Starting HTTP listener...");
 			httpListener.Start();
-			Task coreloop = Main3(httpListener, load, getDatabaseEngine, databaseEngine, exitLock, abortSource.Task);
+			Task coreloop = Main3(httpListener, load, databaseEngine, exitLock, abortSource.Task);
 			Console.WriteLine("Redefining abort handler..");
 			exit = () => {
 				try
@@ -405,12 +393,7 @@ namespace LesbianDB.Server
 						binlogHeight = binlog.Position;
 						binlog.Dispose();
 					}
-					if (closeLevelDB is { })
-					{
-						Console.WriteLine("Closing LevelDB on-disk dictionary...");
-						closeLevelDB();
-					}
-					else if (finalFlush is { })
+					if (finalFlush is { })
 					{
 						if(binlogHeight > 0){
 							Console.WriteLine("Writing fast-recovery checkpoint...");
@@ -449,17 +432,11 @@ namespace LesbianDB.Server
 		private static IFlushableAsyncDictionary CreateSaskia2(ISwapHandle swapHandle){
 			return new EnhancedSequentialAccessDictionary(swapHandle, true);
 		}
-		private static async Task Main3(HttpListener httpListener, Task load, Task<LevelDBEngine> getLevelDBEngine, IDatabaseEngine databaseEngine, AsyncReaderWriterLock exitLock, Task<HttpListenerContext> abort2)
+		private static async Task Main3(HttpListener httpListener, Task load, IDatabaseEngine databaseEngine, AsyncReaderWriterLock exitLock, Task<HttpListenerContext> abort2)
 		{
 			Action disposeLevelDB = null;
 			try{
-				if (databaseEngine is null)
-				{
-					Console.WriteLine("Loading binlog...");
-					LevelDBEngine levelDBEngine = await getLevelDBEngine;
-					disposeLevelDB = levelDBEngine.Dispose;
-					databaseEngine = levelDBEngine;
-				} else if (load is { })
+				if (load is { })
 				{
 					Console.WriteLine("Waiting for database to load...");
 					await load;

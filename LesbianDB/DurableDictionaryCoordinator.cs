@@ -30,6 +30,12 @@ namespace LesbianDB
 			await durableDictionaryCoordinator.Setup();
 			return durableDictionaryCoordinator;
 		}
+		public static DurableDictionaryCoordinator Create(IDurableDictionary durableDictionary, out Task tsk)
+		{
+			DurableDictionaryCoordinator durableDictionaryCoordinator = new DurableDictionaryCoordinator(durableDictionary);
+			tsk = durableDictionaryCoordinator.Setup();
+			return durableDictionaryCoordinator;
+		}
 		private async Task RestoreAndErase(IReadOnlyDictionary<string, string> changes, string key){
 			Task[] tasks = new Task[changes.Count];
 			int i = -1;

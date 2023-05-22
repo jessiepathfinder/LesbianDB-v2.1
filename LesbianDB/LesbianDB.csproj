@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>netcoreapp3.1</TargetFramework>
-    <Version>2.1.45</Version>
+    <Version>2.1.46</Version>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <Description />
   </PropertyGroup>
@@ -16,7 +16,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="LevelDB.Standard" Version="2.1.6.1" />
     <PackageReference Include="Newtonsoft.Json.Bson" Version="1.0.2" />
   </ItemGroup>
 
