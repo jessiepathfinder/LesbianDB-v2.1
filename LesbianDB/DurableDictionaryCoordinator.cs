@@ -100,7 +100,8 @@ namespace LesbianDB
 
 			Dictionary<string, bool> allReads = new Dictionary<string, bool>();
 			Dictionary<string, bool> flatReads = new Dictionary<string, bool>();
-			bool write = writes.Count > 0;
+			int writesCount = writes.Count;
+			bool write = writesCount > 0;
 			if(write){
 				foreach (string key in conditions.Keys)
 				{
@@ -188,71 +189,86 @@ namespace LesbianDB
 					}
 				}
 				if(write){
-					tempexc2 = damage;
-					if (tempexc2 is { })
-					{
-						chkdamagefinally = false;
-						throw new ObjectDamagedException(tempexc2);
-					}
-					unsafeLock = true;
-					while(upgradeQueue.TryDequeue(out LockHandle lockHandle)){
-						await lockHandle.UpgradeToWriteLock();
-					}
-					unsafeLock = false;
-					tempexc2 = damage;
-					if (tempexc2 is { })
-					{
-						chkdamagefinally = false;
-						throw new ObjectDamagedException(tempexc2);
-					}
-					await asyncManagedSemaphore.Enter();
-					string tmpkey;
-					try{
-						tempexc2 = damage;
-						if (tempexc2 is { })
-						{
-							chkdamagefinally = false;
-							throw new ObjectDamagedException(tempexc2);
-						}
-						if (!redoLogKeysPool.TryTake(out tmpkey))
-						{
-							throw new Exception("redo log keys pool exhausted (should not reach here!)");
-						}
-					} catch (Exception e){
-						if(chkdamagefinally){
-							chkdamagefinally = Interlocked.CompareExchange(ref damage, e, null) is { };
-						}
-						asyncManagedSemaphore.Exit();
-						throw;
-					}
-					try
-					{
-						Task logtsk1 = durableDictionary.Write(tmpkey, jsonwrites);
-						Task[] writeTasks = new Task[writes.Count];
-						await logtsk1;
-						int i = -1;
+					if(writesCount == 1){
+						//Single key write fast path
 						foreach(KeyValuePair<string, string> keyValuePair in writes){
-							writeTasks[++i] = durableDictionary.Write(keyValuePair.Key, keyValuePair.Value);
+							await durableDictionary.Write(keyValuePair.Key, keyValuePair.Value);
+							break;
 						}
-						await writeTasks;
-						await durableDictionary.Write(tmpkey, null);
-					}
-					catch (Exception e)
-					{
-						chkdamagefinally = Interlocked.CompareExchange(ref damage, e, null) is { };
-						throw;
-					}
-					finally
-					{
+					} else{
 						tempexc2 = damage;
 						if (tempexc2 is { })
 						{
 							chkdamagefinally = false;
 							throw new ObjectDamagedException(tempexc2);
 						}
-						redoLogKeysPool.Add(tmpkey);
-						asyncManagedSemaphore.Exit();
+						unsafeLock = true;
+						while (upgradeQueue.TryDequeue(out LockHandle lockHandle))
+						{
+							await lockHandle.UpgradeToWriteLock();
+						}
+						unsafeLock = false;
+						tempexc2 = damage;
+						if (tempexc2 is { })
+						{
+							chkdamagefinally = false;
+							throw new ObjectDamagedException(tempexc2);
+						}
+						await asyncManagedSemaphore.Enter();
+						string tmpkey;
+						try
+						{
+							tempexc2 = damage;
+							if (tempexc2 is { })
+							{
+								chkdamagefinally = false;
+								throw new ObjectDamagedException(tempexc2);
+							}
+							if (!redoLogKeysPool.TryTake(out tmpkey))
+							{
+								throw new Exception("redo log keys pool exhausted (should not reach here!)");
+							}
+						}
+						catch (Exception e)
+						{
+							if (chkdamagefinally)
+							{
+								chkdamagefinally = Interlocked.CompareExchange(ref damage, e, null) is { };
+							}
+							asyncManagedSemaphore.Exit();
+							throw;
+						}
+						try
+						{
+							Task logtsk1 = durableDictionary.Write(tmpkey, jsonwrites);
+							Task[] writeTasks = new Task[writesCount];
+							await logtsk1;
+							int i = -1;
+							foreach (KeyValuePair<string, string> keyValuePair in writes)
+							{
+								writeTasks[++i] = durableDictionary.Write(keyValuePair.Key, keyValuePair.Value);
+							}
+							await writeTasks;
+							await durableDictionary.Write(tmpkey, null);
+						}
+						catch (Exception e)
+						{
+							chkdamagefinally = Interlocked.CompareExchange(ref damage, e, null) is { };
+							throw;
+						}
+						finally
+						{
+							tempexc2 = damage;
+							if (tempexc2 is { })
+							{
+								chkdamagefinally = false;
+								throw new ObjectDamagedException(tempexc2);
+							}
+							redoLogKeysPool.Add(tmpkey);
+							asyncManagedSemaphore.Exit();
+						}
 					}
+					
 				}
 			} catch(Exception e){
 				if(chkdamagefinally){

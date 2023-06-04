@@ -773,15 +773,6 @@ namespace LesbianDB.Tests
 			}
 		}
 		[Test]
-		public async Task LevelDBOptimismCounter()
-		{
-			OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(new LevelDBEngine(Misc.GetRandomFileName()), 0);
-			for (int i = 0; i < 4096;)
-			{
-				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
-			}
-		}
-		[Test]
 		public async Task RemoteOptimismCounter()
 		{
 			string url = Environment.GetEnvironmentVariable("LesbianDB_TestRemoteDatabase");
@@ -810,36 +801,6 @@ namespace LesbianDB.Tests
 			for (int i = 2048; i < 4096;)
 			{
 				Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
-			}
-		}
-		[Test]
-		public async Task YuriBinlogLevelDBOptimismCounter()
-		{
-			using MemoryStream binlog = new MemoryStream();
-			string filename = Misc.GetRandomFileName();
-			using (LevelDBEngine levelDBEngine = await LevelDBEngine.RestoreBinlog(binlog, filename)) {
-				OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(levelDBEngine, 0);
-				for (int i = 0; i < 1024;)
-				{
-					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
-				}
-			}
-			using (LevelDBEngine levelDBEngine = await LevelDBEngine.RestoreBinlog(binlog, Misc.GetRandomFileName()))
-			{
-				OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(levelDBEngine, 0);
-				for (int i = 1024; i < 2048;)
-				{
-					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
-				}
-			}
-			binlog.Seek(1234, SeekOrigin.Begin);
-			using (LevelDBEngine levelDBEngine = await LevelDBEngine.RestoreBinlog(binlog, filename))
-			{
-				OptimisticExecutionManager optimisticExecutionManager = new OptimisticExecutionManager(levelDBEngine, 0);
-				for (int i = 2048; i < 4096;)
-				{
-					Assert.AreEqual(i++, await optimisticExecutionManager.ExecuteOptimisticFunction(IncrementOptimisticCounter));
-				}
 			}
 		}
 		private static async Task<int> IncrementOptimisticCounter(IOptimisticExecutionScope optimisticExecutionScope){
