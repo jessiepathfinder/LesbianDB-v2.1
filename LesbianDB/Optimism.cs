@@ -315,6 +315,12 @@ namespace LesbianDB.Optimism.Core
 							}
 						}
 					}
+					{
+						Exception critdmg = optimisticExecutionScope.criticalDamage;
+						if(critdmg is { }){
+							ExceptionDispatchInfo.Throw(critdmg);
+						}
+					}
 
 					keyValuePairs1 = readCache.ToArray();
 					keyValuePairs3 = new Dictionary<string, string>();
