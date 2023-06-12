@@ -301,11 +301,19 @@ namespace LesbianDB.Optimism.Core
 					}
 					catch (Exception e)
 					{
-						if(optimisticExecutionScope.criticalDamage > 0){
-							throw; //We only gets here if we have database failure or OptimisticExecutionScope corruption
+						Exception critdmg = optimisticExecutionScope.criticalDamage;
+						
+						if(critdmg is null){
+							ret = default;
+							failure = e;
+						} else{
+							if(ReferenceEquals(critdmg, e)){
+								throw;
+							} else{
+								ExceptionDispatchInfo.Throw(critdmg);
+								throw;
+							}
 						}
-						ret = default;
-						failure = e;
 					}
 
 					keyValuePairs1 = readCache.ToArray();
@@ -456,14 +464,6 @@ namespace LesbianDB.Optimism.Core
 				}
 			}
 		}
-		private static IEnumerable<KeyValuePair<string, string>> GetUncontendedKeys(IReadOnlyDictionary<string, string> allKeys, Dictionary<string, bool> contendedKeys){
-			foreach(KeyValuePair<string, string> keyValuePair in allKeys){
-				if(contendedKeys.ContainsKey(keyValuePair.Key)){
-					continue;
-				}
-				yield return keyValuePair;
-			}
-		}
 		private static IEnumerable<string> GetInvolvedKeys(KeyValuePair<string, string>[] keyValuePairs, ConcurrentDictionary<string, bool> touchedKeys)
 		{
 			foreach(KeyValuePair<string, string> keyValuePair in keyValuePairs){
@@ -523,7 +523,7 @@ namespace LesbianDB.Optimism.Core
 			public readonly ConcurrentDictionary<string, string> writecache = new ConcurrentDictionary<string, string>();
 			public readonly ConcurrentDictionary<string, string> readcache;
 			public volatile IReadOnlyDictionary<string, string> barrierReads;
-			public volatile int criticalDamage;
+			public volatile Exception criticalDamage;
 
 			public OptimisticExecutionScope(IDatabaseEngine[] databaseEngines, ConcurrentDictionary<string, string> readcache, ConcurrentXHashMap<string>[] optimisticCachePartitions)
 			{
@@ -535,31 +535,56 @@ namespace LesbianDB.Optimism.Core
 
 			public async Task Safepoint()
 			{
-				if(abort == 1){
-					throw new TransactionAbortedException();
+				Exception critdmg = criticalDamage;
+				if (criticalDamage is { })
+				{
+					throw new ObjectDamagedException(critdmg);
+				}
+				if (abort == 1){
+					throw new OptimisticFault();
 				}
 				if (opportunisticRevertNotified == 1)
 				{
 					abort = 1;
 					throw new OptimisticFault();
 				}
-				KeyValuePair<string, string>[] keyValuePairs = readcache.ToArray();
-				IReadOnlyDictionary<string, string> reads = await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(GetKeys(keyValuePairs), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
-				foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs){
-					if(reads[keyValuePair.Key] == keyValuePair.Value){
+				bool throwoptfault = true;
+				try{
+					KeyValuePair<string, string>[] keyValuePairs = readcache.ToArray();
+					IReadOnlyDictionary<string, string> reads = await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(GetKeys(keyValuePairs), SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance);
+					foreach (KeyValuePair<string, string> keyValuePair in keyValuePairs)
+					{
+						if (reads[keyValuePair.Key] == keyValuePair.Value)
+						{
+							throwoptfault = false;
+							break;
+						}
+						Interlocked.CompareExchange(ref barrierReads, reads, null);
+						abort = 1;
 						break;
 					}
-					Interlocked.CompareExchange(ref barrierReads, reads, null);
-					abort = 1;
+				}
+				catch (Exception e)
+				{
+					Interlocked.CompareExchange(ref criticalDamage, e, null);
+					throw;
+				}
+				if(throwoptfault){
 					throw new OptimisticFault();
 				}
+
 			}
 
 			public async Task<string> Read(string key)
 			{
+				Exception critdmg = criticalDamage;
+				if (criticalDamage is { })
+				{
+					throw new ObjectDamagedException(critdmg);
+				}
 				if (abort == 1)
 				{
-					throw new TransactionAbortedException();
+					throw new OptimisticFault();
 				}
 				if (opportunisticRevertNotified == 1)
 				{
@@ -605,17 +630,24 @@ namespace LesbianDB.Optimism.Core
 					}
 					readFromCache.TryAdd(key, false);
 					return value3;
-				} catch{
-					criticalDamage = 1;
+				}
+				catch (Exception e)
+				{
+					Interlocked.CompareExchange(ref criticalDamage, e, null);
 					throw;
 				}
 			}
 
 			public async Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys)
 			{
+				Exception critdmg = criticalDamage;
+				if (criticalDamage is { })
+				{
+					throw new ObjectDamagedException(critdmg);
+				}
 				if (abort == 1)
 				{
-					throw new TransactionAbortedException();
+					throw new OptimisticFault();
 				}
 				if (opportunisticRevertNotified == 1)
 				{
@@ -667,19 +699,25 @@ namespace LesbianDB.Optimism.Core
 						return reads;
 					}
 					abort = 1;
-				} catch{
-					criticalDamage = 1;
+				}
+				catch (Exception e)
+				{
+					Interlocked.CompareExchange(ref criticalDamage, e, null);
 					throw;
 				}
-				
+
 				throw new OptimisticFault();
 			}
 
 			public void Write(string key, string value)
 			{
+				Exception critdmg = criticalDamage;
+				if(criticalDamage is { }){
+					throw new ObjectDamagedException(critdmg);
+				}
 				if (abort == 1)
 				{
-					throw new TransactionAbortedException();
+					throw new OptimisticFault();
 				}
 				if (opportunisticRevertNotified == 1)
 				{
@@ -691,8 +729,8 @@ namespace LesbianDB.Optimism.Core
 				}
 				try{
 					writecache[key] = value;
-				} catch{
-					criticalDamage = 1;
+				} catch (Exception e){
+					Interlocked.CompareExchange(ref criticalDamage, e, null);
 					throw;
 				}
 			}
