@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -300,6 +301,9 @@ namespace LesbianDB.Optimism.Core
 					}
 					catch (Exception e)
 					{
+						if(optimisticExecutionScope.criticalDamage > 0){
+							throw; //We only gets here if we have database failure or OptimisticExecutionScope corruption
+						}
 						ret = default;
 						failure = e;
 					}
@@ -519,6 +523,7 @@ namespace LesbianDB.Optimism.Core
 			public readonly ConcurrentDictionary<string, string> writecache = new ConcurrentDictionary<string, string>();
 			public readonly ConcurrentDictionary<string, string> readcache;
 			public volatile IReadOnlyDictionary<string, string> barrierReads;
+			public volatile int criticalDamage;
 
 			public OptimisticExecutionScope(IDatabaseEngine[] databaseEngines, ConcurrentDictionary<string, string> readcache, ConcurrentXHashMap<string>[] optimisticCachePartitions)
 			{
@@ -565,37 +570,45 @@ namespace LesbianDB.Optimism.Core
 				{
 					throw new ArgumentNullException(key);
 				}
-				if (writecache.TryGetValue(key, out string value1)){
-					return value1;
-				}
-				if (readcache.TryGetValue(key, out value1))
-				{
-					if(writecache.TryGetValue(key, out string value2)){
-						return value2;
-					}
-					readFromCache.TryAdd(key, false);
-					return value1;
-				}
-				ConcurrentXHashMap<string> cacheBucket = optimisticCachePartitions[Hash(key)];
-				Hash256 hash = new Hash256(key);
-				if(cacheBucket.TryGetValue(hash, out value1)){
-					value1 = readcache.GetOrAdd(key, value1);
-					if (writecache.TryGetValue(key, out string value2))
+				try{
+					if (writecache.TryGetValue(key, out string value1))
 					{
-						return value2;
+						return value1;
+					}
+					if (readcache.TryGetValue(key, out value1))
+					{
+						if (writecache.TryGetValue(key, out string value2))
+						{
+							return value2;
+						}
+						readFromCache.TryAdd(key, false);
+						return value1;
+					}
+					ConcurrentXHashMap<string> cacheBucket = optimisticCachePartitions[Hash(key)];
+					Hash256 hash = new Hash256(key);
+					if (cacheBucket.TryGetValue(hash, out value1))
+					{
+						value1 = readcache.GetOrAdd(key, value1);
+						if (writecache.TryGetValue(key, out string value2))
+						{
+							return value2;
+						}
+						readFromCache.TryAdd(key, false);
+						return value1;
+					}
+					string dbvalue = (await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(new string[] { key }, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance))[key];
+					cacheBucket[hash] = dbvalue;
+					string value3 = readcache.GetOrAdd(key, dbvalue);
+					if (writecache.TryGetValue(key, out string value4))
+					{
+						return value4;
 					}
 					readFromCache.TryAdd(key, false);
-					return value1;
+					return value3;
+				} catch{
+					criticalDamage = 1;
+					throw;
 				}
-				string dbvalue = (await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(new string[] { key }, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance))[key];
-				cacheBucket[hash] = dbvalue;
-				string value3 = readcache.GetOrAdd(key, dbvalue);
-				if (writecache.TryGetValue(key, out string value4))
-				{
-					return value4;
-				}
-				readFromCache.TryAdd(key, false);
-				return value3;
 			}
 
 			public async Task<IReadOnlyDictionary<string, string>> VolatileRead(IEnumerable<string> keys)
@@ -609,40 +622,56 @@ namespace LesbianDB.Optimism.Core
 					abort = 1;
 					throw new OptimisticFault();
 				}
-				Dictionary<string, bool> dedup = new Dictionary<string, bool>();
-
-				Dictionary<string, string> reads = new Dictionary<string, string>();
-				foreach(string key in keys){
-					if(key is null){
+				foreach (string key in keys)
+				{
+					if (key is null)
+					{
 						throw new NullReferenceException("Reading null keys is not supported");
 					}
-					readFromCache.TryAdd(key, false);
-					dedup.TryAdd(key, false);
 				}
-				reads.Clear();
-				bool success = true;
-				foreach(KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(dedup.Keys, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance)){
-					string key = keyValuePair.Key;
-					string value = keyValuePair.Value;
-					string existing = readcache.GetOrAdd(key, value);
-					if(success){
-						success = existing == value;
-						if (writecache.TryGetValue(key, out string value1))
-						{
-							reads.Add(key, value1);
-						}
-						else
-						{
-							reads.Add(key, value);
-						}
+
+				try
+				{
+					Dictionary<string, bool> dedup = new Dictionary<string, bool>();
+
+					Dictionary<string, string> reads = new Dictionary<string, string>();
+					foreach (string key in keys)
+					{
+						readFromCache.TryAdd(key, false);
+						dedup.TryAdd(key, false);
 					}
-					optimisticCachePartitions[Hash(key)][key] = value;
-					
+					reads.Clear();
+					bool success = true;
+					foreach (KeyValuePair<string, string> keyValuePair in await databaseEngines[Misc.FastRandom(0, databaseCount)].Execute(dedup.Keys, SafeEmptyReadOnlyDictionary<string, string>.instance, SafeEmptyReadOnlyDictionary<string, string>.instance))
+					{
+						string key = keyValuePair.Key;
+						string value = keyValuePair.Value;
+						string existing = readcache.GetOrAdd(key, value);
+						if (success)
+						{
+							success = existing == value;
+							if (writecache.TryGetValue(key, out string value1))
+							{
+								reads.Add(key, value1);
+							}
+							else
+							{
+								reads.Add(key, value);
+							}
+						}
+						optimisticCachePartitions[Hash(key)][key] = value;
+
+					}
+					if (success)
+					{
+						return reads;
+					}
+					abort = 1;
+				} catch{
+					criticalDamage = 1;
+					throw;
 				}
-				if(success){
-					return reads;
-				}
-				abort = 1;
+				
 				throw new OptimisticFault();
 			}
 
@@ -660,7 +689,12 @@ namespace LesbianDB.Optimism.Core
 				if (key is null){
 					throw new ArgumentNullException(key);
 				}
-				writecache[key] = value;
+				try{
+					writecache[key] = value;
+				} catch{
+					criticalDamage = 1;
+					throw;
+				}
 			}
 		}
 		
